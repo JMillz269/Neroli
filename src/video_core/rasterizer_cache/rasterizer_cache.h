@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include "common/frame_cost.h"
+#include <algorithm>
+#include <atomic>
+#include <span>
 #include <type_traits>
 #include <boost/container/small_vector.hpp>
 #include <boost/range/iterator_range.hpp>
@@ -967,6 +971,92 @@ SurfaceId RasterizerCache<T>::FindMatch(const SurfaceParams& params, ScaleMatch 
 }
 
 template <class T>
+bool RasterizerCache<T>::ValidateByTileCopy(SurfaceId surface_id, SurfaceInterval interval) {
+    const PAddr start = boost::icl::first(interval);
+    const PAddr end = boost::icl::last_next(interval);
+    {
+        const Surface& dst = slot_surfaces[surface_id];
+        if (dst.type == SurfaceType::Fill || !dst.is_tiled || dst.stride != dst.width ||
+            dst.LevelOf(start) != 0 || end > dst.LevelInterval(0).upper()) {
+            return false;
+        }
+    }
+    const Surface& dst_params = slot_surfaces[surface_id];
+    const u32 tile_bytes = dst_params.BytesInPixels(8 * 8);
+    if (tile_bytes == 0 || (start - dst_params.addr) % tile_bytes != 0 ||
+        (end - dst_params.addr) % tile_bytes != 0) {
+        return false;
+    }
+
+    // A surface holding valid data for the whole interval, laid out in tiles of the same size.
+    SurfaceId src_id{};
+    ForEachSurfaceInRegion(start, end - start, [&](SurfaceId id, Surface& other) {
+        if (src_id || id == surface_id) {
+            return;
+        }
+        if (other.type == SurfaceType::Fill || !other.is_tiled || other.pixel_format != dst_params.pixel_format ||
+            other.res_scale != dst_params.res_scale || other.stride != other.width ||
+            other.stride == dst_params.stride || other.addr > start ||
+            end > other.LevelInterval(0).upper() || !other.IsRegionValid(interval)) {
+            return;
+        }
+        const s64 offset = static_cast<s64>(dst_params.addr) - static_cast<s64>(other.addr);
+        if (offset % tile_bytes != 0) {
+            return;
+        }
+        src_id = id;
+    });
+    if (!src_id) {
+        return false;
+    }
+
+    Surface& src = slot_surfaces[src_id];
+    Surface& dst = slot_surfaces[surface_id];
+    const u32 scale = dst.res_scale;
+    const u32 dst_columns = dst.stride / 8;
+    const u32 src_columns = src.stride / 8;
+    const u32 src_rows = src.height / 8;
+    const s64 tile_shift =
+        (static_cast<s64>(dst.addr) - static_cast<s64>(src.addr)) / static_cast<s64>(tile_bytes);
+
+    // Tiles are numbered in memory order, row by row. A run of tiles that stays within one row of
+    // both surfaces is one copy. Rows are stored bottom up, see SurfaceParams::GetSubRect.
+    boost::container::small_vector<TextureCopy, 128> copies;
+    const u32 first_tile = (start - dst.addr) / tile_bytes;
+    const u32 end_tile = (end - dst.addr) / tile_bytes;
+    for (u32 tile = first_tile; tile < end_tile;) {
+        const u32 dst_row = tile / dst_columns;
+        const u32 dst_column = tile % dst_columns;
+        const s64 src_tile = static_cast<s64>(tile) + tile_shift;
+        if (src_tile < 0) {
+            return false;
+        }
+        const u32 src_row = static_cast<u32>(src_tile / src_columns);
+        const u32 src_column = static_cast<u32>(src_tile % src_columns);
+        if (src_row >= src_rows || dst_row >= dst.height / 8) {
+            return false;
+        }
+        const u32 run = std::min({dst_columns - dst_column, src_columns - src_column,
+                                  end_tile - tile});
+        copies.push_back(TextureCopy{
+            .src_level = 0,
+            .dst_level = 0,
+            .src_layer = 0,
+            .dst_layer = 0,
+            .src_offset = {src_column * 8 * scale, (src.height - 8 * (src_row + 1)) * scale},
+            .dst_offset = {dst_column * 8 * scale, (dst.height - 8 * (dst_row + 1)) * scale},
+            .extent = {run * 8 * scale, 8 * scale},
+        });
+        tile += run;
+    }
+    if (copies.empty()) {
+        return false;
+    }
+    return runtime.CopyTextures(src, dst,
+                                std::span<const TextureCopy>(copies.data(), copies.size()));
+}
+
+template <class T>
 void RasterizerCache<T>::ValidateSurface(SurfaceId surface_id, PAddr addr, u32 size) {
     if (size == 0) [[unlikely]] {
         return;
@@ -1034,6 +1124,35 @@ void RasterizerCache<T>::ValidateSurface(SurfaceId surface_id, PAddr addr, u32 s
             continue;
         }
 
+        // A surface over the same memory with another stride (a 256 wide render target used as a
+        // 240 wide one, as in Luigi's Mansion: Dark Moon) holds the same tiles in another order.
+        if (ValidateByTileCopy(surface_id, interval)) {
+            notify_validated(interval);
+            continue;
+        }
+
+        // No GPU side way to make this texture from the surfaces in the cache: the memory is read
+        // back to the CPU and uploaded again. Say why, for the first few times and every 400th.
+        static std::atomic<u32> readback_count{0};
+        if (const u32 count = readback_count.fetch_add(1); count < 4 || count % 400 == 0) {
+            LOG_INFO(Render,
+                     "Validating texture by readback: {:#x}-{:#x} {}x{} stride {} format {} tiled "
+                     "{} scale {} (needs {:#x}-{:#x})",
+                     surface.addr, surface.end, surface.width, surface.height, surface.stride,
+                     static_cast<int>(surface.pixel_format), surface.is_tiled, surface.res_scale,
+                     boost::icl::first(interval), boost::icl::last_next(interval));
+            ForEachSurfaceInRegion(
+                params.addr, params.size, [&](SurfaceId other_id, Surface& other) {
+                    LOG_INFO(Render,
+                             "  overlaps surface {}: {:#x}-{:#x} {}x{} stride {} type {} format {} "
+                             "tiled {} scale {} valid {}",
+                             other_id.index == surface_id.index ? "(itself)" : "", other.addr,
+                             other.end, other.width, other.height, other.stride,
+                             static_cast<int>(other.type), static_cast<int>(other.pixel_format),
+                             other.is_tiled, other.res_scale, other.IsRegionValid(interval));
+                });
+        }
+
         FlushRegion(params.addr, params.size);
         if (!use_custom_textures || !UploadCustomSurface(surface_id, interval)) {
             UploadSurface(slot_surfaces[surface_id], interval);
@@ -1052,6 +1171,7 @@ void RasterizerCache<T>::ValidateSurface(SurfaceId surface_id, PAddr addr, u32 s
 template <class T>
 void RasterizerCache<T>::UploadSurface(Surface& surface, SurfaceInterval interval) {
     MICROPROFILE_SCOPE(RasterizerCache_UploadSurface);
+    Common::FrameCost::Scope frame_cost{Common::FrameCost::Kind::TextureUpload};
 
     const SurfaceParams load_info = surface.FromInterval(interval);
     ASSERT(load_info.addr >= surface.addr && load_info.end <= surface.end);

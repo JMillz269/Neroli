@@ -1,0 +1,138 @@
+// Copyright 2026 Citra Emulator Project / Azahar Emulator Project
+// Licensed under GPLv3 or any later version
+// Refer to the LICENSE.txt file included.
+
+#import <AzaharCore/AZConfiguration.h>
+
+@implementation AZConfiguration
+
++ (instancetype)defaultConfiguration {
+    AZConfiguration* config = [[AZConfiguration alloc] init];
+    config.useCPUJIT = YES;
+    config.cpuClockPercentage = 100;
+    config.useShaderJIT = YES;
+    config.useHardwareShaders = YES;
+    config.accurateMultiplication = YES;
+    config.resolutionFactor = 1;
+    config.linearFiltering = YES;
+    config.textureFilter = 0;
+    config.upscaling = 0;
+    config.upscaleFactorTenths = 0;
+    config.sharpPixels = NO;
+    config.sharpness = 0;
+    config.sharpenMethod = 0;
+    config.scaleFilter = 0;
+    config.gridStrength = 0;
+    config.saturation = 0;
+    config.contrast = 0;
+    config.brightness = 0;
+    config.skipDuplicateFrames = NO;
+    config.asyncShaderCompilation = YES;
+    config.framePacing = YES;
+    config.displaySync = YES;
+    config.frameCap30 = NO;
+    config.frameCapHoldsGame = YES;
+    config.pacingBufferMs = 0;
+    config.fastShaderMath = NO;
+    config.fastLighting = NO;
+    config.fastLightingLookups = NO;
+    config.fastColor = NO;
+    config.loggingEnabled = NO;
+    config.fastMathFunctions = NO;
+    config.halfInterpolants = NO;
+    config.untrackedBuffers = NO;
+    config.vertexReuse = NO;
+    config.vertexFastFunctions = NO;
+    config.vertexFastMath = NO;
+    config.texturePool = NO;
+    config.hiddenSurfaceRemoval = NO;
+    config.drawOptimizations = YES;
+    config.gpuPassTiming = NO;
+    config.dumpShaders = NO;
+    config.textureCompression = 0;
+    config.fastDepthReadback = NO;
+    config.holdFramesForShaders = YES;
+    config.frameGeneration = 0;
+    config.frameGenerationSize = 1;
+    config.frameGenerationTopOnly = NO;
+    config.frameGenerationPause = NO;
+    config.frameGenerationBuffer = NO;
+    config.frameGenerationDisplayPaced = NO;
+    config.frameGenerationMetalFX = NO;
+    config.displayRefreshRate = 60;
+    config.shaderWaitMs = 2;
+    config.stereoMode = 0;
+    config.outerCamera = 0;
+    config.innerCamera = 0;
+    config.stereoDepth = 50;
+    config.swapEyes3D = NO;
+    config.anisotropy = 4;
+    config.diskShaderCache = YES;
+    config.layoutOption = AZLayoutOptionDefault;
+    config.portraitLayoutOption = AZPortraitLayoutOptionTopFullWidth;
+    config.screenGap = 0;
+    config.largeScreenProportion = 4.0f;
+    config.smallScreenPosition = 2;
+    config.customLayoutLandscape = @[];
+    config.customLayoutPortrait = @[];
+    config.customSecondLayerOpacity = 100;
+    config.useExternalDisplay = YES;
+    config.secondaryDisplayLayout = 0;
+    config.disableRightEyeRender = NO;
+    config.integerScaling = NO;
+    config.asyncCustomTextures = YES;
+    config.deterministicAsync = NO;
+    config.simulateHeadphones = NO;
+    config.simulateGPUTimings = NO;
+    config.gpuTimingPercent = 100;
+    config.gpuTimingMinMs = 0;
+    config.customTextures = NO;
+    config.preloadTextures = NO;
+    config.dumpTextures = NO;
+    config.swapScreens = NO;
+    config.uprightScreens = NO;
+    config.audioStretching = YES;
+    config.realtimeAudio = NO;
+    config.volume = 1.0f;
+    config.gameHacksEnabled = YES;
+    config.gameHackOverrides = @{};
+    config.audioEmulation = 0;
+    config.lleApplets = NO;
+    config.textureSampling = 0;
+    config.monoEye = 0;
+    config.postEffect = 0;
+    config.anaglyphMode = 0;
+    config.postShader = @"";
+    config.useVirtualSD = YES;
+    config.compressCIAInstalls = NO;
+    config.customStoragePath = nil;
+    config.fixedClock = NO;
+    config.fixedTime = 946681277;
+    config.fixedBattery = NO;
+    config.batteryLevel = 4;
+    config.batteryCharging = YES;
+    config.stepsPerHour = 0;
+    config.regionFreePatch = YES;
+    config.pluginLoader = NO;
+    config.onlineModules = NO;
+    config.aspectRatio = 0;
+    config.topStretch = NO;
+    config.bottomStretch = NO;
+    config.topPaddingH = 0;
+    config.topPaddingV = 0;
+    config.bottomPaddingH = 0;
+    config.bottomPaddingV = 0;
+    config.cardboardSize = 85;
+    config.cardboardXShift = 0;
+    config.cardboardYShift = 0;
+    config.fastForwardSpeed = 300;
+    config.fastForwardHold = NO;
+    config.isNew3DS = YES;
+    config.region = -1;
+    config.useFrameLimit = YES;
+    config.frameLimit = 100;
+    config.syncSpeedToDisplay = YES;
+    return config;
+}
+
+@end

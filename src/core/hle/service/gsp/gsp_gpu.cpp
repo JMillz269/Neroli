@@ -427,6 +427,9 @@ void GSP_GPU::SetBufferSwap(Kernel::HLERequestContext& ctx) {
 
     // Real hardware ignores invalid screens and still returns success.
     if (screen_id < 2) {
+        if (screen_id == 0) {
+            top_swap_requested = true;
+        }
         system.GPU().SetBufferSwap(screen_id, fb_info);
     } else {
         LOG_ERROR(Service_GSP, "Invalid screen id {}", screen_id);
@@ -657,6 +660,11 @@ void GSP_GPU::SignalInterruptForThread(InterruptId interrupt_id, u32 thread_id, 
         track_average(true);
 #endif
 
+        if (interrupt_id == InterruptId::PDC0) {
+            last_vblank_us =
+                static_cast<u64>(system.Kernel().timing.GetGlobalTimeUs().count());
+        }
+
         if (perf_recorder.IsEnabled()) {
             constexpr u64 nanoseconds_per_frame = static_cast<u64>(
                 ((static_cast<double>(VideoCore::FRAME_TICKS) / BASE_CLOCK_RATE_ARM11) * 1e9));
@@ -673,7 +681,6 @@ void GSP_GPU::SignalInterruptForThread(InterruptId interrupt_id, u32 thread_id, 
     }
 
     if (Settings::values.simulate_3ds_gpu_timings.GetValue()) {
-
         if (delay_texture_copy_completion) {
             wait_delay_ns += (interrupt_id == InterruptId::PPF)
                                  ? sync_delay_nanoseconds_delayed_texcopy
@@ -686,6 +693,27 @@ void GSP_GPU::SignalInterruptForThread(InterruptId interrupt_id, u32 thread_id, 
             wait_delay_ns += sync_delay_nanoseconds_delayed_texcopy;
         } else {
             wait_delay_ns = 0;
+        }
+    }
+
+    // A floor for the time from the start of the game's frame (the vertical blank that showed
+    // its previous one) to the end of the 3D commands: the game then sees every frame take at
+    // least that long, however many command lists it used, and a game that adapts its frame
+    // rate holds 30 FPS in scenes it would do 60 in. Counting from the latest vertical blank
+    // instead would hold a frame whose work went past a refresh for a third one. Set by the
+    // frontend (Minimum GPU Time while simulating the GPU, or the 30 FPS frame cap).
+    const u64 floor_ns =
+        static_cast<u64>(Pica::g_gpu_timing_min_us.load(std::memory_order_relaxed)) * 1000;
+    if (interrupt_id == InterruptId::P3D && floor_ns != 0 && last_vblank_us != 0) {
+        const u64 now_us = static_cast<u64>(system.Kernel().timing.GetGlobalTimeUs().count());
+        // Without a buffer swap seen lately (none yet, or the game shows its frames some other
+        // way), count from the latest vertical blank as before.
+        const bool recent_swap = frame_start_us != 0 && now_us >= frame_start_us &&
+                                 now_us - frame_start_us < 100'000;
+        const u64 start_us = recent_swap ? frame_start_us : last_vblank_us;
+        const u64 since_ns = now_us > start_us ? (now_us - start_us) * 1000 : 0;
+        if (since_ns < floor_ns) {
+            wait_delay_ns = std::max(wait_delay_ns, floor_ns - since_ns);
         }
     }
 
@@ -791,9 +819,18 @@ void GSP_GPU::SignalInterrupt(InterruptId interrupt_id, u64 wait_delay_ns) {
         // GPU right is used.
         const u32 screen_id = (interrupt_id == InterruptId::PDC0) ? 0 : 1;
         auto info = GetFrameBufferInfo(thread_id_with_rights, screen_id);
-        if (info.first || force_buffer_swap[screen_id]) {
+        const bool swapped = info.first || force_buffer_swap[screen_id];
+        if (swapped) {
             force_buffer_swap[screen_id] = false;
             system.GPU().SetBufferSwap(screen_id, *info.second);
+        }
+        if (screen_id == 0) {
+            // A new top screen picture: the game's next frame starts at this vertical blank.
+            if (swapped || top_swap_requested) {
+                frame_start_us =
+                    static_cast<u64>(system.Kernel().timing.GetGlobalTimeUs().count());
+            }
+            top_swap_requested = false;
         }
 
         for (u32 thread_id = 0; thread_id < MaxGSPThreads; ++thread_id) {

@@ -1,141 +1,166 @@
-![Azahar Emulator](https://azahar-emu.org/resources/images/logo/azahar-name-and-logo.svg)
+<p align="center">
+  <img src="src/citra_ios/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png" width="160" alt="Neroli app icon">
+</p>
 
-![Current Release](https://img.shields.io/github/v/release/azahar-emu/azahar?label=Current%20Release)
-![Current Prerelease](https://img.shields.io/github/v/release/azahar-emu/azahar?include_prereleases&label=Current%20Prerelease)
+<h1 align="center">Neroli</h1>
 
-![GitHub Downloads](https://img.shields.io/github/downloads/azahar-emu/azahar/total?logo=github&label=GitHub%20Downloads)
-![Google Play Downloads](https://playbadges.pavi2410.com/badge/downloads?id=io.github.lime3ds.android&pretty&label=Play%20Store%20Downloads)
-![Flathub Downloads](https://img.shields.io/flathub/downloads/org.azahar_emu.Azahar?logo=flathub&label=Flathub%20Downloads)
-![CI Build Status](https://github.com/azahar-emu/azahar/actions/workflows/build.yml/badge.svg)
+<p align="center">
+  <b>A Nintendo 3DS emulator for iPhone and iPad, built on Azahar with a native Metal renderer.</b>
+</p>
 
-**Azahar** is a free and open-source high level Nintendo 3DS emulator for PC and mobile devices. Our goal is to give 3DS owners a place to enjoy their library of titles with improvements to the original hardware, such as higher resolutions, modern controllers or save states. The emulator also serves as a debugging hub for homebrew developers and as a research and preservation platform for the 3DS ecosystem.
-
-The project continues the legacy of **Citra** and is actively developed by a community of contributors.
-
-*Azahar is not affiliated with or endorsed by Nintendo.*
-
-# Installation
-
-### Windows
-
-Azahar is available as both an installer and a zip archive.
-
-Download the latest release in your preferred format from the [Releases](https://github.com/azahar-emu/azahar/releases) page.
-
-If you are unsure of whether you want to use MSVC or MXE, use MXE.
+<p align="center">
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/license-GPLv3%2B-blue" alt="License: GPLv3 or later"></a>
+  <img src="https://img.shields.io/badge/iOS-16%2B-black?logo=apple" alt="iOS 16 or later">
+  <img src="https://img.shields.io/badge/renderer-Metal-orange" alt="Metal renderer">
+</p>
 
 ---
 
-### MacOS
+Neroli is an iOS port of [Azahar](https://github.com/azahar-emu/azahar), the open-source 3DS
+emulator that continues the work of Citra. It replaces Azahar's desktop and Android frontends with
+a SwiftUI app made for iPhone and iPad, and renders through a Metal backend written for Apple GPUs,
+with no Vulkan or MoltenVK layer in between.
 
-To download a build that will work on all Macs, you can download the `macos-universal` build on the [Releases](https://github.com/azahar-emu/azahar/releases) page.
-
-Alternatively, if you wish to download a build specifically for your Mac, you can choose either:
-
-- `macos-arm64` for Apple Silicon Macs
-- `macos-x86_64` for Intel Macs
-
----
-
-### Android
-
-There are two variants of Azahar available on Android, those being the Vanilla and Google Play builds.
-
-The Vanilla build is technically superior, as it uses an alternative method of file management which is faster, but isn't permitted on the Google Play store.
-
-For most users, we currently recommended downloading Azahar on Android via the Google Play Store for ease of accessibility:
-
-<a href='https://play.google.com/store/apps/details?id=io.github.lime3ds.android'><img width='180' alt='Get it on Google Play' src='https://raw.githubusercontent.com/pioug/google-play-badges/06ccd9252af1501613da2ca28eaffe31307a4e6d/svg/English.svg'/></a>
-
-Alternatively, you can install the app using Obtainium, allowing you to use the Vanilla variant:
-1. Download and install Obtainium from [here](https://github.com/ImranR98/Obtainium/releases) (use the file named `app-release.apk`)
-2. Open Obtainium and click 'Add App'
-3. Type `https://github.com/azahar-emu/azahar` into the 'App Source URL' section
-4. Click 'Add'
-5. Click 'Install', and select the preferred variant
-
-If you wish, you can also simply install the latest APK from the [Releases](https://github.com/azahar-emu/azahar/releases) page.
-
-Keep in mind that you will not recieve automatic updates when installing via the APK.
-
----
-
-### Linux
-
-The recommended format for using Azahar on Linux is the Flatpak available on Flathub:
-
-<a href='https://flathub.org/apps/org.azahar_emu.Azahar'><img width='180' alt='Download on Flathub' src='https://dl.flathub.org/assets/badges/flathub-badge-en.png'/></a>
-
-Azahar is also available as an AppImage on the [Releases](https://github.com/azahar-emu/azahar/releases) page.
-
-There are two variants of the AppImage available, those being `azahar.AppImage` and `azahar-wayland.AppImage`.
-
-If you are unsure of which variant to use, we recommend using the default `azahar.AppImage`. This is because of upstream issues in the Wayland ecosystem which may cause problems when running the emulator (e.g. [#1162](https://github.com/azahar-emu/azahar/issues/1162)).
-
-Unless you explicitly require native Wayland support (e.g. you are running a system with no Xwayland), the non-Wayland variant is recommended.
-
-The Flatpak build of Azahar also has native Wayland support disabled by default. If you require native Wayland support, it can be enabled using [Flatseal](https://flathub.org/en/apps/com.github.tchx84.Flatseal).
-
-# Build instructions
-
-Please refer this repository's [wiki](https://github.com/azahar-emu/azahar/wiki/Building-From-Source) for build instructions
-
-# How can I contribute?
-
-### Pull requests
-
-If you want to implement a change and have the technical capability to do so, we would be happy to accept your contributions.
-
-If you are contributing a new feature, it is highly suggested that you first make a Feature Request issue to discuss the addition before writing any code. This is to ensure that your time isn't wasted working on a feature which isn't deemed appropriate for the project.
-
-After creating a pull request, please don't repeatedly merge `master` into your branch. A maintainer will update the branch for you if/ when it is appropriate to do so.
-
-### Language translations
-
-Additionally, we are accepting language translations on [Transifex](https://app.transifex.com/azahar/azahar). If you know a non-english language listed on our Transifex page, please feel free to contribute.
+The name comes from neroli oil, distilled from orange blossoms. *Azahar* is Spanish for orange
+blossom.
 
 > [!NOTE]
-> We are not currently accepting new languages for translation. Please do not request for new languages or language variants to be added.
+> Neroli is an independent fork. It is **not affiliated with or endorsed by the Azahar developers
+> or by Nintendo**. Please report problems with Neroli here, not to the Azahar project.
 
-### Compatibility reports
+## Features
 
-Even if you don't wish to contribute code or translations, you can help the project by reporting game compatibility data to our compatibility list.
+### Graphics
 
-To do so, simply read https://github.com/azahar-emu/compatibility-list/blob/master/CONTRIBUTING.md and follow the instructions.
+- **Native Metal renderer** tuned for Apple's tile-based GPUs: hidden surface removal, depth-only
+  pipelines, hardware scissoring and in-pass clears.
+- **Hardware shaders**: the 3DS's vertex programs run on the GPU as Metal shaders.
+- **Shader cache** that persists between sessions (a per-game disk cache plus a Metal binary
+  archive), with asynchronous compilation, so stutter fades after the first play.
+- **Higher internal resolutions**, anisotropic filtering, texture filters (Anime4K, ScaleForce,
+  xBRZ, MMPX and more) and custom texture packs.
+- **MetalFX upscaling** and sharpening, including contrast adaptive sharpening.
+- **Post-processing**: built-in effects plus your own `.metal` shaders.
+- **3D modes**: side-by-side, anaglyph and interlaced, with per-eye options.
 
-Contributing compatibility data helps more accurately reflect the current capabilities of the emulator, so it would be highly appreciated if you could go through the reporting process after completing a game.
+### Smoothness
 
-# Minimum requirements
+- **Frame generation** (iOS 26): Apple's VideoToolbox or MetalFX frame interpolation turns 60 FPS
+  into 120 FPS on ProMotion displays.
+  - **Adaptive** sizing, **Pause When Behind**, **Frame Buffer** and **Top Screen Only**.
+- **Frame pacing** driven by the display, a per-game **60 Hz or 120 Hz** refresh rate, and a
+  30 FPS frame cap for games that run at 30.
 
-Below are the minimum requirements to run Azahar:
+### Playing
 
-### Desktop
+- Game library with grid and list views, per-game settings and play statistics.
+- **On-screen controller** you can rearrange, resize and save as layouts.
+- **Game controllers** with button mapping and profiles, motion controls and haptics.
+- **Save states**, save data backup and restore, **cheats**, **amiibo**, movie recording.
+- **CIA installation** for games, updates and DLC, plus game compression.
+- **Online play** through Azahar's multiplayer rooms, and **Artic** streaming from a real 3DS.
+- 3GX plugins, the system keyboard and Mii selector, cameras and microphone.
+- **External display** support over AirPlay or a cable.
 
+### iOS
+
+- **JIT** through StikDebug or StosDebug (Universal.js), or the built-in JIT helper. Without JIT,
+  Neroli falls back to the slower interpreters.
+- Works inside **LiveContainer**.
+- Liquid Glass interface on iOS 26, with your data in the Files app.
+
+## Requirements
+
+- An iPhone or iPad on **iOS 16 or later** (arm64).
+- **iOS 26** for frame generation and the Liquid Glass design.
+- A recent device is strongly recommended. Development and testing happen on an iPhone 16 Pro Max.
+- **JIT** for full speed. See [Enabling JIT](#enabling-jit).
+
+## Installing
+
+There are no prebuilt releases yet. [Build the IPA](#building) or use one built by CI, then
+install it with a sideloading tool such as SideStore, AltStore or Sideloadly, or add it to
+LiveContainer.
+
+Updating keeps your data as long as you install over the existing app: the bundle identifier
+never changes. Versions from before the rename (Azahar-iOS) update in place too. Their `Azahar`
+data folder is moved to `Neroli` on the first launch.
+
+## Enabling JIT
+
+iOS only lets an app generate code while a debugger is attached to it. Neroli needs that for the
+CPU recompiler (dynarmic) and the shader JIT. Choose one:
+
+- **StikDebug or StosDebug**: launch Neroli from the debugger app, which attaches and runs the
+  Universal.js script.
+- **Built-in JIT Helper**: import your device's pairing file in **Settings › General**. Neroli then
+  enables JIT itself through a small app extension, using the
+  [idevice](https://github.com/jkcoxson/idevice) library.
+
+**Settings › General** shows whether JIT is active.
+
+## Getting started
+
+1. **Dump your games** from your own 3DS. Neroli does not include games, system files or keys, and
+   does not help you get them.
+2. Import games with the **+** button, or copy them to **Files › On My iPhone › Neroli › ROMs**.
+   Supported formats: `.3ds`/`.cci`, `.cxi`, `.3dsx`, `.app`, `.elf`/`.axf`, their compressed
+   `.z*` versions, and `.cia` to install.
+3. Optionally, copy `sysdata`, `nand` and `sdmc` from a desktop Azahar install to
+   **Files › Neroli › Neroli**. The folder layout is the same.
+
+Many options can be set per game: open a game's menu in the library and choose **Game Settings**.
+
+## Building
+
+You need macOS with Xcode 16 or later.
+
+```bash
+git submodule update --init --recursive
 ```
-Operating System: Windows 10 (64-bit), MacOS 13.4 (Ventura), or modern 64-bit Linux
-CPU: x86-64/ARM64 CPU (Windows for ARM not supported).
-     Single core performance higher than 1,800 on Passmark.
-     SSE4.2 required on x86_64.
-GPU: OpenGL 4.3 or Vulkan 1.1 support
-Memory: 2GB of RAM. 4GB is recommended
-```
-### Android
 
-```
-Operating System: Android 10.0+ (64-bit)
-CPU: Snapdragon 835 SoC or better
-GPU: OpenGL ES 3.2 or Vulkan 1.1 support
-Memory: 2GB of RAM. 4GB is recommended
+```bash
+./.ci/ios.sh configure
 ```
 
-# What's next?
+```bash
+./.ci/ios.sh build
+```
 
-We share public roadmaps for upcoming releases in the form of GitHub milestones.
+```bash
+./.ci/ios.sh package
+```
 
-You can find these at https://github.com/azahar-emu/azahar/milestones.
+This writes `artifacts/Neroli-unsigned.ipa`. For the built-in JIT helper, first build the idevice
+library with `./.ci/build-idevice.sh build/idevice-out`, which needs Rust. The CircleCI pipeline
+in `.circleci/config.yml` runs all of these steps and validates every generated Metal shader with
+Apple's compiler.
 
-# Join the conversation
+For signing with a free Apple account, the Metal renderer's architecture and more, see the
+[iOS port's README](src/citra_ios/README.md).
 
-We have a community Discord server where you can chat about the project, keep up to date with the latest announcements, or coordinate emulator development.
+## Reporting problems
 
-Join at https://discord.gg/4ZjMpAp3M6
+Turn on **Write Log** in **Settings › About**, reproduce the problem, then use **Share Log** and
+attach the file to an [issue](https://github.com/JMillz269/Neroli/issues). Include your device,
+iOS version, the game, and whether JIT was on.
+
+## Credits
+
+- [Azahar](https://github.com/azahar-emu/azahar) and [Citra](https://github.com/citra-emu/citra)
+  and their contributors, whose emulator Neroli is built on.
+- [dynarmic](https://github.com/azahar-emu/dynarmic) and
+  [oaknut](https://github.com/merryhime/oaknut) by merryhime, the CPU recompiler.
+- [idevice](https://github.com/jkcoxson/idevice) by Jackson Coxson, used by the JIT helper.
+- [DolphiniOS](https://github.com/OatmealDome/dolphin-ios) and ARMSX3, whose approach the JIT
+  helper follows.
+- The authors of every library listed in **Settings › About › Licenses**.
+
+## License
+
+Neroli is free software, licensed under the
+[GNU General Public License, version 3](LICENSE.txt) or any later version. Some older files from
+Azahar and Citra are under the [GPLv2 or later](misc/licenses/gplv2.txt). Third-party components
+keep their own licenses, which the app shows under **Settings › About › Licenses**.
+
+Nintendo 3DS is a trademark of Nintendo. Neroli is not affiliated with Nintendo in any way.
