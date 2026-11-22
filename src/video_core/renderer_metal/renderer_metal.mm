@@ -437,7 +437,9 @@ private:
                                 u32 screen_id_r, float x, float y, float w, float h,
                                 Layout::DisplayOrientation orientation);
     void SetOpacity(id<MTLRenderCommandEncoder> encoder, float alpha);
-    void LimitFramesAheadOfGpu();
+    /// Waits for the GPU work of the previous frame (at most one frame in flight). Not
+    /// RendererBase::LimitFramesAheadOfGpu: that one runs only with upstream's optional setting.
+    void WaitForPreviousFrame();
     void DrawQuad(id<MTLRenderCommandEncoder> encoder,
                   const std::array<ScreenRectVertex, 4>& vertices, id<MTLTexture> texture,
                   const PresentUniforms& uniforms);
@@ -2945,8 +2947,8 @@ void RendererMetal::RenderScreenshot() {
     }
 }
 
-void RendererMetal::LimitFramesAheadOfGpu() {
-    if (previous_frame_tick != 0) {
+void RendererMetal::WaitForPreviousFrame() {
+    if (GetQualityOptions().wait_for_gpu && previous_frame_tick != 0) {
         scheduler.Wait(previous_frame_tick);
     }
     previous_frame_tick = scheduler.CurrentTick() - 1;
@@ -3035,7 +3037,7 @@ void RendererMetal::SwapBuffers() {
     }
 
     scheduler.Flush();
-    LimitFramesAheadOfGpu();
+    WaitForPreviousFrame();
     Stats().frames.fetch_add(1, std::memory_order_relaxed);
     Stats().adapt_frames.fetch_add(1, std::memory_order_relaxed);
 
@@ -3145,6 +3147,8 @@ FrameStats TakeFrameStats() {
     const u32 draws = stats.draws.exchange(0);
     const u32 skipped = stats.skipped.exchange(0);
     const u32 render_passes = stats.render_passes.exchange(0);
+    const u32 msaa_refreshes = stats.msaa_refreshes.exchange(0);
+    const u32 msaa_plain_passes = stats.msaa_plain_passes.exchange(0);
     const u32 blit_passes = stats.blit_passes.exchange(0);
     const u32 feedback_copies = stats.feedback_copies.exchange(0);
     const u64 drawable_ns = stats.drawable_ns.exchange(0);
@@ -3190,6 +3194,8 @@ FrameStats TakeFrameStats() {
         result.draws = static_cast<double>(draws) / frames;
         result.skipped = static_cast<double>(skipped) / frames;
         result.render_passes = static_cast<double>(render_passes) / frames;
+        result.msaa_refreshes = static_cast<double>(msaa_refreshes) / frames;
+        result.msaa_plain_passes = static_cast<double>(msaa_plain_passes) / frames;
         result.blit_passes = static_cast<double>(blit_passes) / frames;
         result.feedback_copies = static_cast<double>(feedback_copies) / frames;
         result.drawable_ms = static_cast<double>(drawable_ns) / 1e6 / frames;
