@@ -830,15 +830,19 @@ void Scheduler::FlushPendingClears() {
         // resolves it into the texture, so the copy stays up to date and is not refreshed from
         // the cleared texture before the next pass (games clear their buffers every frame).
         // Not for a depth-only clear of a copy that is out of date: its stencil would stay old.
+        // A rectangle is drawn into the copy the same way when the copy is up to date (it is
+        // loaded): Majora's Mask clears part of its depth buffer like that every frame, and the
+        // refresh it caused cost about 2 ms of GPU time a frame.
         MsaaTexture* msaa = nullptr;
-        if (!clear.partial && clear.level == 0 && clear.slice == 0) {
+        if (clear.level == 0 && clear.slice == 0) {
             const auto it =
                 msaa_textures.find(reinterpret_cast<std::uintptr_t>((__bridge void*)clear.texture));
             if (it != msaa_textures.end() && it->second.msaa != nil) {
                 id<MTLTexture> owner = it->second.owner;
-                const bool clears_all = !clear.is_depth || clear.has_stencil ||
-                                        clear.texture.pixelFormat !=
-                                            MTLPixelFormatDepth32Float_Stencil8;
+                const bool clears_all = !clear.partial &&
+                                        (!clear.is_depth || clear.has_stencil ||
+                                         clear.texture.pixelFormat !=
+                                             MTLPixelFormatDepth32Float_Stencil8);
                 if (owner == clear.texture && (clears_all || it->second.valid)) {
                     msaa = &it->second;
                     msaa->valid = true;
@@ -847,7 +851,8 @@ void Scheduler::FlushPendingClears() {
         }
         if (msaa == nullptr) {
             // Drawn into the texture itself, outside of any multisampled pass.
-            NoteWritten(clear.texture);
+            NoteWritten(clear.texture, clear.partial ? "partial clear of its own"
+                                                     : "depth-only clear of its own");
         }
         if (clear.partial) {
             // A rectangle with nothing to take it over: a pass of its own that draws it.
@@ -873,10 +878,37 @@ void Scheduler::FlushPendingClears() {
                 desc.colorAttachments[0].loadAction = MTLLoadActionLoad;
                 desc.colorAttachments[0].storeAction = MTLStoreActionStore;
             }
+            if (msaa != nullptr) {
+                // Into the up to date multisampled copy, resolved into the texture.
+                if (clear.is_depth) {
+                    desc.depthAttachment.texture = msaa->msaa;
+                    desc.depthAttachment.level = 0;
+                    desc.depthAttachment.resolveTexture = clear.texture;
+                    desc.depthAttachment.depthResolveFilter =
+                        MTLMultisampleDepthResolveFilterSample0;
+                    desc.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+                    if (clear.has_stencil) {
+                        desc.stencilAttachment.texture = msaa->msaa;
+                        desc.stencilAttachment.level = 0;
+                        desc.stencilAttachment.resolveTexture = clear.texture;
+                        desc.stencilAttachment.stencilResolveFilter =
+                            MTLMultisampleStencilResolveFilterSample0;
+                        desc.stencilAttachment.storeAction =
+                            MTLStoreActionStoreAndMultisampleResolve;
+                    }
+                } else {
+                    desc.colorAttachments[0].texture = msaa->msaa;
+                    desc.colorAttachments[0].level = 0;
+                    desc.colorAttachments[0].slice = 0;
+                    desc.colorAttachments[0].resolveTexture = clear.texture;
+                    desc.colorAttachments[0].storeAction =
+                        MTLStoreActionStoreAndMultisampleResolve;
+                }
+            }
             render_encoder = [CommandBuffer() renderCommandEncoderWithDescriptor:desc];
             Stats().render_passes.fetch_add(1, std::memory_order_relaxed);
             pass_label = clear.is_depth ? "partial clear depth" : "partial clear color";
-            pass_samples = 1;
+            pass_samples = msaa != nullptr ? static_cast<u32>(msaa->msaa.sampleCount) : 1;
             id<MTLTexture> sized = clear.texture;
             BeginPassStats(static_cast<u32>(std::max<NSUInteger>(sized.width >> clear.level, 1)),
                            static_cast<u32>(std::max<NSUInteger>(sized.height >> clear.level, 1)),
@@ -1038,10 +1070,10 @@ id<MTLRenderCommandEncoder> Scheduler::BeginRendering(const RenderTarget& target
     // next multisampled pass loads it, or that pass would resolve the old copy over this drawing.
     bool plain_into_msaa = false;
     if (color_msaa == nil) {
-        plain_into_msaa |= NoteWritten(target.color);
+        plain_into_msaa |= NoteWritten(target.color, "game pass without MSAA");
     }
     if (depth_msaa == nil) {
-        plain_into_msaa |= NoteWritten(target.depth);
+        plain_into_msaa |= NoteWritten(target.depth, "game pass without MSAA");
     }
     if (plain_into_msaa && StatisticsEnabled()) {
         Stats().msaa_plain_passes.fetch_add(1, std::memory_order_relaxed);
@@ -1142,13 +1174,19 @@ id<MTLRenderCommandEncoder> Scheduler::BeginRendering(const RenderTarget& target
 }
 
 id<MTLRenderCommandEncoder> Scheduler::BeginRendering(MTLRenderPassDescriptor* descriptor) {
+    // The clears flushed first would take the caller's label.
+    const char* label = pass_label;
+    pass_label = nullptr;
     end_reason = "a utility pass (clear, blit, present)";
     EndEncoding();
     end_reason = nullptr;
     FlushPendingClears();
-    // Its attachments are drawn into directly, not through a multisampled copy.
-    NoteWritten(descriptor.colorAttachments[0].texture);
-    NoteWritten(descriptor.depthAttachment.texture);
+    pass_label = label;
+    // Its attachments are drawn into directly, not through a multisampled copy (refreshing a
+    // copy draws into the copy itself, which nothing notes).
+    const char* reason = label != nullptr ? label : "utility pass";
+    NoteWritten(descriptor.colorAttachments[0].texture, reason);
+    NoteWritten(descriptor.depthAttachment.texture, reason);
     pass_samples = 1;
     id<MTLCommandBuffer> buffer = CommandBuffer();
     AttachPassTiming(descriptor);
@@ -1207,6 +1245,18 @@ id<MTLTexture> Scheduler::MsaaFor(id<MTLTexture> texture, id<MTLTexture> stencil
         end_reason = nullptr;
         if (StatisticsEnabled()) {
             Stats().msaa_refreshes.fetch_add(1, std::memory_order_relaxed);
+            msaa_refresh_reasons[fmt::format("{} ({})", entry.stale_reason,
+                                             is_depth ? "depth" : "color")]++;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - msaa_reasons_logged >= std::chrono::seconds{10}) {
+                msaa_reasons_logged = now;
+                std::string text;
+                for (const auto& [reason, count] : msaa_refresh_reasons) {
+                    text += fmt::format("{}{} {}", text.empty() ? "" : ", ", reason, count);
+                }
+                LOG_INFO(Render, "MSAA: multisampled copies refreshed after: {}", text);
+                msaa_refresh_reasons.clear();
+            }
         }
     }
     // The pass that asked keeps it up to date from now on.
@@ -1214,7 +1264,7 @@ id<MTLTexture> Scheduler::MsaaFor(id<MTLTexture> texture, id<MTLTexture> stencil
     return entry.msaa;
 }
 
-bool Scheduler::NoteWritten(id<MTLTexture> texture) {
+bool Scheduler::NoteWritten(id<MTLTexture> texture, const char* reason) {
     if (msaa_textures.empty() || texture == nil) {
         return false;
     }
@@ -1222,6 +1272,9 @@ bool Scheduler::NoteWritten(id<MTLTexture> texture) {
     const auto it = msaa_textures.find(reinterpret_cast<std::uintptr_t>((__bridge void*)base));
     if (it == msaa_textures.end()) {
         return false;
+    }
+    if (it->second.valid) {
+        it->second.stale_reason = reason;
     }
     it->second.valid = false;
     return true;

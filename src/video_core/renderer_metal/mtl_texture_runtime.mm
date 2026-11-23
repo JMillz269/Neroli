@@ -488,9 +488,10 @@ TextureRuntime::TextureRuntime(const Instance& instance_, Scheduler& scheduler_)
         const Common::Rectangle<u32> rect{0, height, width, 0};
         scheduler.SetPassLabel("MSAA refresh");
         if (is_depth) {
-            if (stencil_view == nil && resolved.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 &&
-                (resolved.usage & MTLTextureUsagePixelFormatView) != 0) {
-                stencil_view = [resolved newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+            if (stencil_view == nil && resolved.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) {
+                stencil_view = (resolved.usage & MTLTextureUsagePixelFormatView) != 0
+                                   ? [resolved newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8]
+                                   : StencilCopy(resolved);
             }
             blit_helper.BlitDepthStencil(resolved, stencil_view, 0, rect, msaa, 0, rect);
         } else {
@@ -502,6 +503,52 @@ TextureRuntime::TextureRuntime(const Instance& instance_, Scheduler& scheduler_)
 TextureRuntime::~TextureRuntime() {
     scheduler.SetRectClearDrawer({});
     scheduler.SetMsaaRefresher({});
+}
+
+id<MTLTexture> TextureRuntime::StencilCopy(id<MTLTexture> depth) {
+    // The stencil of a depth texture that cannot have a stencil view (texture compression), for
+    // the refresh of its multisampled copy: copied with blits into an R8Uint texture, which the
+    // depth-stencil blit reads like the view.
+    const u32 width = static_cast<u32>(depth.width);
+    const u32 height = static_cast<u32>(depth.height);
+    id<MTLDevice> device = instance.GetDevice();
+    if (stencil_copy == nil || stencil_copy.width != width || stencil_copy.height != height) {
+        MTLTextureDescriptor* desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        desc.storageMode = MTLStorageModePrivate;
+        desc.usage = MTLTextureUsageShaderRead;
+        stencil_copy = [device newTextureWithDescriptor:desc];
+        stencil_copy_buffer = [device newBufferWithLength:static_cast<NSUInteger>(width) * height
+                                                  options:MTLResourceStorageModePrivate];
+        if (stencil_copy == nil || stencil_copy_buffer == nil) {
+            stencil_copy = nil;
+            return nil;
+        }
+    }
+    id<MTLBlitCommandEncoder> blit = scheduler.BlitEncoder();
+    [blit copyFromTexture:depth
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(width, height, 1)
+                        toBuffer:stencil_copy_buffer
+               destinationOffset:0
+          destinationBytesPerRow:width
+        destinationBytesPerImage:static_cast<NSUInteger>(width) * height
+                         options:MTLBlitOptionStencilFromDepthStencil];
+    [blit copyFromBuffer:stencil_copy_buffer
+               sourceOffset:0
+          sourceBytesPerRow:width
+        sourceBytesPerImage:static_cast<NSUInteger>(width) * height
+                 sourceSize:MTLSizeMake(width, height, 1)
+                  toTexture:stencil_copy
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    return stencil_copy;
 }
 
 VideoCore::StagingData TextureRuntime::FindStaging(u32 size, bool upload) {
@@ -651,8 +698,6 @@ bool TextureRuntime::CopyTextures(Surface& source, Surface& dest,
         return false;
     }
 
-    id<MTLBlitCommandEncoder> blit = scheduler.BlitEncoder();
-    scheduler.NoteWritten(dst);
     for (const auto& copy : copies) {
         const auto [src_w, src_h] = LevelExtent(src, copy.src_level);
         const auto [dst_w, dst_h] = LevelExtent(dst, copy.dst_level);
@@ -667,6 +712,8 @@ bool TextureRuntime::CopyTextures(Surface& source, Surface& dest,
         if (width == 0 || height == 0) {
             continue;
         }
+        id<MTLBlitCommandEncoder> blit = scheduler.BlitEncoder();
+        scheduler.NoteWritten(dst, "copy");
         [blit copyFromTexture:src
                   sourceSlice:copy.src_layer
                   sourceLevel:copy.src_level
@@ -943,8 +990,10 @@ id<MTLTexture> Surface::CreateTexture(u32 tex_width, u32 tex_height, MTLPixelFor
     TexturePool& pool = runtime->GetTexturePool();
     if (pool.Enabled()) {
         if (id<MTLTexture> reused = pool.Acquire(TexturePool::KeyOf(desc))) {
-            // Its multisampled copy (MSAA) has the pixels of the surface that had it before.
-            scheduler->NoteWritten(reused);
+            // Its multisampled copy (MSAA), if any, still matches it: a texture in the pool is not
+            // written, and whatever writes it next keeps the copy in step (or marks it out of
+            // date). Marking it out of date here made Majora's Mask, which gets its depth buffer
+            // anew every frame, refresh the copy every frame for nothing (about 2 ms of GPU time).
             return reused;
         }
     }
@@ -968,7 +1017,7 @@ id<MTLTexture> Surface::CopyTexture() {
                              src.pixelFormat, "copy");
     }
     [scheduler->BlitEncoder() copyFromTexture:src toTexture:copy];
-    scheduler->NoteWritten(copy);
+    scheduler->NoteWritten(copy, "feedback copy");
     Stats().feedback_copies.fetch_add(1, std::memory_order_relaxed);
     return copy;
 }
@@ -996,7 +1045,7 @@ id<MTLTexture> Surface::ReplaceWithFullUsage(Type type) {
                       texture.pixelFormat, "full usage", true);
     [scheduler->BlitEncoder() copyFromTexture:texture toTexture:replacement];
     // The replacement may come from the texture pool with a multisampled copy of other pixels.
-    scheduler->NoteWritten(replacement);
+    scheduler->NoteWritten(replacement, "replacement texture");
     textures[type] = replacement;
     textures[Type::Copy] = nil;
     storage_view = nil;
@@ -1040,7 +1089,7 @@ void Surface::Upload(const VideoCore::BufferTextureCopy& upload,
     const MTLOrigin origin = MTLOriginMake(rect.left, std::min(rect.bottom, rect.top), 0);
     const MTLSize size = MTLSizeMake(rect_width, rect_height, 1);
     id<MTLBuffer> buffer = runtime->upload_buffer.Handle();
-    scheduler->NoteWritten(texture);
+    scheduler->NoteWritten(texture, "upload");
 
     if (traits.has_stencil) {
         // De-interleave the (D24 << 8 | S8) words into a float depth plane and a stencil plane.
@@ -1132,7 +1181,7 @@ void Surface::UploadCustom(const VideoCore::Material* custom_material, u32 level
         runtime->upload_buffer.Commit(custom_size);
 
         const auto [bytes_per_row, rows] = CustomLayout(custom_format, mat_width, mat_height);
-        scheduler->NoteWritten(target);
+        scheduler->NoteWritten(target, "custom texture upload");
         [scheduler->BlitEncoder() copyFromBuffer:runtime->upload_buffer.Handle()
                                     sourceOffset:offset
                                sourceBytesPerRow:bytes_per_row
@@ -1409,11 +1458,9 @@ Framebuffer::Framebuffer(TextureRuntime& runtime, const VideoCore::FramebufferPa
         (depth && (depth_level != 0 || depth->texture_type != VideoCore::TextureType::Texture2D))) {
         samples = 1;
     }
-    if (samples > 1 && depth && depth->HasStencil()) {
-        // Taken before the depth texture below: it may replace the texture with one that can
-        // have a stencil view.
-        target.stencil_view = depth->StencilTexture();
-    }
+    // No stencil view is taken here: with texture compression the depth texture has to be
+    // replaced by a copy that allows one, every time the game gets a new depth buffer (Majora's
+    // Mask does every frame). A refresh of the multisampled copy gets the stencil itself.
 
     if (color) {
         const auto [w, h] = level_extent(color, color_level);
