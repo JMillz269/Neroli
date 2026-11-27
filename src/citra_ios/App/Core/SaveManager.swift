@@ -16,7 +16,7 @@ enum SaveManager {
         var errorDescription: String? {
             switch self {
             case .noSave: return "This game has no save data yet."
-            case .notASave: return "That folder does not hold save data of a game."
+            case .notASave: return "That does not hold save data of a game."
             case .failed(let reason): return reason
             }
         }
@@ -74,7 +74,47 @@ enum SaveManager {
         return destination
     }
 
-    /// The backups of a game, newest first.
+    /// Writes the save data of a game as one ZIP file (of the save folder's contents) into the
+    /// backups folder and returns it. Other tools can open it, and importing it (here or by
+    /// extracting it into the game's save folder elsewhere) brings the save back.
+    @discardableResult
+    static func exportZip(_ game: Game) throws -> URL {
+        let source = saveDirectory(of: game)
+        guard FileManager.default.fileExists(atPath: source.path) else { throw SaveError.noSave }
+        let name = "\(safeName(game.title)) \(tag(of: game)) \(stamp()).zip"
+        let destination = backupsDirectory.appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(at: backupsDirectory,
+                                                    withIntermediateDirectories: true)
+            try ZipArchive.write(contentsOf: source, to: destination)
+        } catch {
+            throw SaveError.failed(error.localizedDescription)
+        }
+        return destination
+    }
+
+    /// The folder in an extracted ZIP that holds the save (the one with the folder 00000001),
+    /// looked for a few levels down: ZIPs made by other tools often wrap it in folders.
+    private static func saveRoot(in folder: URL, depth: Int = 0) -> URL? {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: folder.appendingPathComponent("00000001").path,
+                                  isDirectory: &isDirectory), isDirectory.boolValue {
+            return folder
+        }
+        guard depth < 4 else { return nil }
+        let children = (try? fileManager.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        for child in children {
+            if (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+               let found = saveRoot(in: child, depth: depth + 1) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// The backups of a game (folders and ZIP files), newest first.
     static func backups(of game: Game) -> [URL] {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: backupsDirectory, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
@@ -88,6 +128,21 @@ enum SaveManager {
         let fileManager = FileManager.default
         let accessing = folder.startAccessingSecurityScopedResource()
         defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
+
+        // A ZIP file is extracted first and its save folder restored.
+        if folder.pathExtension.lowercased() == "zip" {
+            let temporary = fileManager.temporaryDirectory
+                .appendingPathComponent("save-import-\(UUID().uuidString)", isDirectory: true)
+            defer { try? fileManager.removeItem(at: temporary) }
+            do {
+                try ZipArchive.extract(folder, to: temporary)
+            } catch {
+                throw SaveError.failed(error.localizedDescription)
+            }
+            guard let root = saveRoot(in: temporary) else { throw SaveError.notASave }
+            try restore(game, from: root)
+            return
+        }
 
         // A save folder holds the folder 00000001, the folder chosen may also be the one above.
         var source = folder

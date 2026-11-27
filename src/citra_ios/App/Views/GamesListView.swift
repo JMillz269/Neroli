@@ -307,6 +307,23 @@ extension GameInfoView {
         }
     }
 
+    fileprivate func exportZip() {
+        do {
+            let url = try SaveManager.exportZip(game)
+            backups = SaveManager.backups(of: game)
+            saveMessage = "Saved as \(url.lastPathComponent) in Files › Neroli › saves. Open "
+                + "Files to share or move it."
+        } catch {
+            saveMessage = error.localizedDescription
+        }
+    }
+
+    fileprivate func importZip() {
+        DocumentImporter.present { urls in
+            if let file = urls.first { pendingRestore = file }
+        }
+    }
+
     fileprivate func restore(from folder: URL) {
         do {
             try SaveManager.restore(game, from: folder)
@@ -369,6 +386,9 @@ struct GameInfoView: View {
                     Section {
                         Button("Back Up Save Data") { backUp() }
                             .disabled(!SaveManager.hasSave(of: game))
+                        Button("Export Save as a ZIP File") { exportZip() }
+                            .disabled(!SaveManager.hasSave(of: game))
+                        Button("Import Save from a ZIP File…") { importZip() }
                         Button("Restore Save Data from a Folder…") {
                             FolderPicker.present { folder in
                                 if let folder { pendingRestore = folder }
@@ -397,8 +417,12 @@ struct GameInfoView: View {
                         Text("Save Data")
                     } footer: {
                         Text("A backup is a copy of the game's save in Files › Neroli › saves. "
+                             + "Export as ZIP writes the save as one file there, which can be "
+                             + "shared or moved to another device; Import reads such a ZIP "
+                             + "(also one from Azahar or Citra with the save folder in it). "
                              + "Restoring replaces the save of the game with a backup (or any "
-                             + "folder with a save) and keeps the save it had as a backup first.")
+                             + "folder or ZIP with a save) and keeps the save it had as a backup "
+                             + "first.")
                     }
                 }
                 Section("Details") {
