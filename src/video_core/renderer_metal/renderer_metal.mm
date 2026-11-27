@@ -1935,19 +1935,29 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
         block[i] = dot(cur.read(uint2(min(origin + int2(i & 7, i >> 3), size - 1))).rgb, kLuma);
     }
     float best = 1e9;
+    float best_error = 1e9;
     int2 best_vector = int2(0);
     // Around the coarse vector, and no motion at all.
     for (int k = -1; k < 25; ++k) {
         const int2 v = k < 0 ? int2(0) : center + int2(k % 5 - 2, k / 5 - 2);
-        float sad = 0.02 * float(abs(v.x) + abs(v.y));
+        float error = 0.0;
         for (int i = 0; i < 64; ++i) {
             const int2 q = clamp(origin + int2(i & 7, i >> 3) + v, int2(0), size - 1);
-            sad += abs(block[i] - dot(prev.read(uint2(q)).rgb, kLuma));
+            error += abs(block[i] - dot(prev.read(uint2(q)).rgb, kLuma));
         }
+        const float sad = error + 0.02 * float(abs(v.x) + abs(v.y));
         if (sad < best) {
             best = sad;
+            best_error = error;
             best_vector = v;
         }
+    }
+    // Where even the best match is poor (something uncovered, covered or changing: the content
+    // does not move as one piece there) a vector would only drag the old picture over the new
+    // one. No motion lets MetalFX blend the two frames as they are, which is what its depth
+    // would otherwise tell it for covered and uncovered areas.
+    if (best_error / 64.0 > 0.12) {
+        best_vector = int2(0);
     }
     blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
 }
