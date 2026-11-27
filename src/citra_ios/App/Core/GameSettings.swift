@@ -55,6 +55,8 @@ struct GameOverrides: Codable, Equatable {
     /// RefreshRateOption raw value (0 Automatic, 60, 120).
     var refreshRate: Int?
     var frameCap30: Bool?
+    var steadyThirty: Bool?
+    var presentEveryRefresh: Bool?
     var frameCapHoldsGame: Bool?
     var shaderWaitMs: Int?
     var disableRightEyeRender: Bool?
@@ -65,8 +67,11 @@ struct GameOverrides: Codable, Equatable {
     var controllerProfile: String?
     var customTextures: Bool?
     var preloadTextures: Bool?
+    var preloadGame: Bool?
+    var preloadGameCompressed: Bool?
     var hiddenSurfaceRemoval: Bool?
     var drawOptimizations: Bool?
+    var fastWBufferDepth: Bool?
     var antiAliasing: Int?
     var waitForGPU: Bool?
     var textureCompression: Int?
@@ -145,6 +150,8 @@ struct GameOverrides: Codable, Equatable {
             config.displayRefreshRate = refreshRate == 0 ? screenMax : min(refreshRate, screenMax)
         }
         if let frameCap30 { config.frameCap30 = frameCap30 }
+        if let steadyThirty { config.steadyThirty = steadyThirty }
+        if let presentEveryRefresh { config.presentEveryRefresh = presentEveryRefresh }
         if let frameCapHoldsGame { config.frameCapHoldsGame = frameCapHoldsGame }
         if let frameGenerationDisplayPaced {
             config.frameGenerationDisplayPaced = frameGenerationDisplayPaced
@@ -156,8 +163,11 @@ struct GameOverrides: Codable, Equatable {
         if let skipDuplicateFrames { config.skipDuplicateFrames = skipDuplicateFrames }
         if let customTextures { config.customTextures = customTextures }
         if let preloadTextures { config.preloadTextures = preloadTextures }
+        if let preloadGame { config.preloadGame = preloadGame }
+        if let preloadGameCompressed { config.preloadGameCompressed = preloadGameCompressed }
         if let hiddenSurfaceRemoval { config.hiddenSurfaceRemoval = hiddenSurfaceRemoval }
         if let drawOptimizations { config.drawOptimizations = drawOptimizations }
+        if let fastWBufferDepth { config.fastWBufferDepth = fastWBufferDepth }
         if let antiAliasing { config.antiAliasing = antiAliasing }
         if let waitForGPU { config.waitForGPU = waitForGPU }
         if let textureCompression { config.textureCompression = textureCompression }

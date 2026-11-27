@@ -202,6 +202,9 @@ typedef NS_ENUM(NSInteger, AZCompressStatus) {
 @property(nonatomic, readonly) double displayFramesPerSecond;
 /// Progress (0 to 1) of building the cached shaders while a game boots, negative otherwise.
 @property(nonatomic, readonly) double shaderBuildProgress;
+/// Progress (0 to 1) of reading the game into memory while it boots (Preload Game into Memory),
+/// negative otherwise.
+@property(nonatomic, readonly) double gamePreloadProgress;
 /// Average GPU time, time the emulation thread waited for the GPU, and draw calls per frame.
 @property(nonatomic, readonly) double gpuMilliseconds;
 @property(nonatomic, readonly) double stallMilliseconds;
@@ -218,6 +221,9 @@ typedef NS_ENUM(NSInteger, AZCompressStatus) {
 /// Called on the main thread with a message for the user that is not an error stopping emulation
 /// (for example a failed save state).
 @property(nonatomic, copy, nullable) void (^onNotice)(NSString* title, NSString* message);
+/// Called on the main thread with a short message to show over the game for a few seconds (for
+/// example why the game could not be preloaded into memory).
+@property(nonatomic, copy, nullable) void (^onToast)(NSString* message);
 
 /// Called on the main thread when emulation stops on its own (shutdown or error). The error is
 /// nil on a regular shutdown.
@@ -283,6 +289,10 @@ typedef NS_ENUM(NSInteger, AZCompressStatus) {
 /// The bottom screen in drawable pixels (the area touch positions land on), or an empty
 /// rectangle while there is none.
 @property(nonatomic, readonly) CGRect bottomScreenFrame;
+/// Where both screens are in the current layout, as fractions of the window (top screen x, y,
+/// width, height, then the bottom screen's), or nil while there is no layout. The custom layout
+/// editor starts from it.
+@property(nonatomic, readonly, nullable) NSArray<NSNumber*>* currentScreenFractions;
 /// Accelerometer in g and gyroscope in degrees per second, in 3DS axes.
 - (void)setMotionAccelerationX:(float)ax
                              y:(float)ay
@@ -395,6 +405,26 @@ typedef NS_ENUM(NSInteger, AZCompressStatus) {
                   progress:(void (^)(double fraction))progress
                 completion:(void (^)(AZCompressStatus status, NSString* _Nullable outputPath))
                                completion;
+
+// ROM bundles (.bcci, .bcxi, .bcia): a game together with its update and DLC CIAs in one file.
+
+/// Why the file cannot go into a ROM bundle, as the game (`asDependency` NO) or as an update or
+/// DLC (YES, those have to be CIAs), or nil when it can. Safe to call from any thread.
++ (nullable NSString*)bundleProblemForFileAtPath:(NSString*)path
+                                    asDependency:(BOOL)asDependency
+    NS_SWIFT_NAME(bundleProblem(forFileAtPath:asDependency:));
+
+/// Creates a ROM bundle of the game and its dependencies (update and DLC CIAs) on a background
+/// queue, in `directory`, named like the game with the bundle extension the core recommends
+/// (.bcci, .bcxi or .bcia). It is written under a temporary name first. `progress` and
+/// `completion` are called on the main thread; the completion gets the path of the bundle when it
+/// worked, or a description of what went wrong.
++ (void)createBundleWithGameAtPath:(NSString*)gamePath
+                      dependencies:(NSArray<NSString*>*)dependencies
+                       toDirectory:(NSString*)directory
+                          progress:(void (^)(double fraction))progress
+                        completion:(void (^)(BOOL success, NSString* result))completion
+    NS_SWIFT_NAME(createBundle(withGameAtPath:dependencies:toDirectory:progress:completion:));
 
 // CIA installation, safe to call from any thread while no title is running.
 

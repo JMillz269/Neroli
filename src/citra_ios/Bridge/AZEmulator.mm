@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cmath>
 #include <chrono>
+#include <os/proc.h>
 #include <condition_variable>
 #include <exception>
 #include <memory>
@@ -31,6 +32,10 @@
 #include "citra_ios/Bridge/mic_ios.h"
 #include "citra_ios/Bridge/emu_window_ios.h"
 #include "citra_ios/Bridge/input_ios.h"
+#include "citra_ios/Bridge/jit_warmup.h"
+#include "common/file_derived.h"
+#include "common/file_preload.h"
+#include "core/file_sys/ncch_container.h"
 #include "common/apple_jit.h"
 #include "common/common_paths.h"
 #include "common/file_util.h"
@@ -42,7 +47,7 @@
 #if defined(__aarch64__)
 namespace Dynarmic {
 /// Defined by externals/patches/dynarmic-ios-jit-timing.patch.
-extern void (*g_block_compile_hook)(std::uint64_t nanoseconds);
+extern void (*g_block_compile_hook)(std::uint64_t descriptor, std::uint64_t nanoseconds);
 extern void (*g_cache_clear_hook)(int full, std::uint64_t used, std::uint64_t size);
 } // namespace Dynarmic
 #endif
@@ -98,6 +103,105 @@ NSString* DescribeResult(Core::System::ResultStatus result, const std::string& d
 bool IsArticPath(const std::string& path) {
     return path.starts_with("articbase://") || path.starts_with("articinio://") ||
            path.starts_with("articinin://");
+}
+
+/**
+ * Preload Game into Memory: reads the game into memory before it is loaded, so playing never reads
+ * it from storage. A compressed game (.zcci, .zcxi, or one in a .bcci bundle) is kept decompressed,
+ * so it is not decompressed while playing either, unless `keep_compressed` asks to keep it as it
+ * is stored (less memory, decompressed as it is read); anything else is kept as the file is. The file
+ * classes find the image by itself (common/file_preload.h). Skipped, with a log line, when iOS
+ * would leave the app too little memory for the game itself.
+ */
+/// Returns a message for the user when the game is not preloaded (empty otherwise).
+std::string PreloadGame(const std::string& filepath, bool keep_compressed,
+                        const std::atomic<bool>& stop, std::atomic<double>& progress) {
+    const std::string not_preloaded = "Could not load the game into memory, it is read from "
+                                      "storage as usual.";
+    const auto gigabytes = [](u64 bytes) {
+        return fmt::format("{:.1f} GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+    };
+    // What the game needs besides its file: its memory, textures and render targets at a higher
+    // resolution, shaders, the code caches. iOS ends an app that goes over its limit.
+    constexpr u64 HEADROOM = 1536ULL << 20;
+    constexpr u64 CHUNK = 8ULL << 20;
+
+    auto image = std::make_shared<FileUtil::Preload::Image>();
+    std::unique_ptr<FileUtil::IOFileBase> source = FileSys::NCCHContainer::AutoOpenNCCHNCSD(filepath);
+    u64 stored_size = 0;
+    auto* const compressed = dynamic_cast<FileUtil::Z3DSReadIOFile*>(source.get());
+    const bool is_compressed = compressed != nullptr && compressed->IsGood();
+    if (is_compressed && !keep_compressed) {
+        image->kind = FileUtil::Preload::Image::Kind::Decompressed;
+        image->filename = compressed->Filename();
+        image->source_size = compressed->GetCompressedSize();
+        image->size = compressed->GetSize();
+        stored_size = image->source_size;
+    } else {
+        source = std::make_unique<FileUtil::IOFile>(filepath, "rb");
+        if (!source->IsOpen()) {
+            LOG_WARNING(Frontend, "Preload: could not open {}", filepath);
+            return not_preloaded;
+        }
+        image->kind = FileUtil::Preload::Image::Kind::Raw;
+        image->filename = source->Filename();
+        image->source_size = image->size = source->GetSize();
+        stored_size = image->size;
+    }
+    if (image->size == 0) {
+        return {};
+    }
+
+    const u64 available = os_proc_available_memory();
+    if (available == 0 || image->size + HEADROOM > available) {
+        LOG_WARNING(Frontend,
+                    "Preload: the game is {} MiB, iOS leaves the app {} MiB; it is read from "
+                    "storage as usual (at least {} MiB stay free for the game itself)",
+                    image->size >> 20, available >> 20, HEADROOM >> 20);
+        if (available != 0 && is_compressed && !keep_compressed &&
+            stored_size + HEADROOM <= available) {
+            return fmt::format("Not enough memory for the decompressed game ({}). Turn on Keep "
+                               "Compressed in Memory to preload it. It is read from storage as "
+                               "usual.",
+                               gigabytes(image->size));
+        }
+        return fmt::format("Not enough memory to load the game into memory ({}, {} available). "
+                           "It is read from storage as usual.",
+                           gigabytes(image->size), gigabytes(available > HEADROOM
+                                                                 ? available - HEADROOM
+                                                                 : 0));
+    }
+    image->data.reset(new (std::nothrow) u8[image->size]);
+    if (!image->data) {
+        LOG_WARNING(Frontend, "Preload: could not allocate {} MiB", image->size >> 20);
+        return not_preloaded;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    for (u64 offset = 0; offset < image->size; offset += CHUNK) {
+        if (stop.load(std::memory_order_relaxed)) {
+            return {};
+        }
+        const u64 count = std::min(CHUNK, image->size - offset);
+        if (source->ReadAtBytes(image->data.get() + offset, count, offset) != count) {
+            LOG_WARNING(Frontend, "Preload: reading {} failed at {} MiB, it is read from storage "
+                                  "as usual",
+                        filepath, offset >> 20);
+            return not_preloaded;
+        }
+        progress = static_cast<double>(offset + count) / static_cast<double>(image->size);
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    LOG_INFO(Frontend, "Preload: {} MiB of game in memory{} in {:.1f} s ({} MiB of memory left)",
+             image->size >> 20,
+             image->kind == FileUtil::Preload::Image::Kind::Decompressed
+                 ? fmt::format(", decompressed from {} MiB", stored_size >> 20)
+                 : (is_compressed ? std::string{" (kept compressed, decompressed as it is read)"}
+                                  : std::string{}),
+             seconds, os_proc_available_memory() >> 20);
+    FileUtil::Preload::Add(std::move(image));
+    return {};
 }
 
 NSString* FindEntryWithLength(NSString* directory, NSUInteger length) {
@@ -291,6 +395,7 @@ const char* ThermalStateName() {
     std::atomic<double> _fps;
     std::atomic<double> _displayFps;
     std::atomic<double> _shaderProgress;
+    std::atomic<double> _preloadProgress;
     std::atomic<double> _gpuMs;
     std::atomic<double> _stallMs;
     std::atomic<double> _drawsPerFrame;
@@ -306,6 +411,13 @@ const char* ThermalStateName() {
     Settings::LayoutOption _userLayoutOption;
     bool _userSwapScreens;
     NSInteger _secondaryLayoutMode;
+    /// Compile blocks of game code seen in earlier runs ahead of time (see jit_warmup.h).
+    BOOL _jitWarmup;
+    /// Read the game into memory before it starts (see PreloadGame).
+    BOOL _preloadGame;
+    BOOL _preloadGameCompressed;
+    /// CPU JIT was asked for but JIT is not enabled: the game runs with the interpreter.
+    BOOL _jitFallback;
     // Fractions of the custom layouts, see AZConfiguration (guarded by _surfaceMutex).
     std::array<float, 8> _customLandscape;
     std::array<float, 8> _customPortrait;
@@ -408,6 +520,7 @@ const char* ThermalStateName() {
         _fps = 0.0;
         _displayFps = 0.0;
         _shaderProgress = -1.0;
+        _preloadProgress = -1.0;
         _gpuMs = 0.0;
         _stallMs = 0.0;
         _drawsPerFrame = 0.0;
@@ -442,6 +555,10 @@ const char* ThermalStateName() {
 
 - (double)shaderBuildProgress {
     return _shaderProgress.load();
+}
+
+- (double)gamePreloadProgress {
+    return _preloadProgress.load();
 }
 
 - (double)gpuMilliseconds {
@@ -517,8 +634,11 @@ const char* ThermalStateName() {
 
     // Without a debugger attached, iOS does not allow mapping executable memory.
     [AZEmulator setLoggingEnabled:configuration.loggingEnabled];
+    // Without JIT both run on the interpreters (the fast interpreter for the CPU), so a game
+    // still runs, only slower.
     values.use_cpu_jit = configuration.useCPUJIT && jit;
     values.use_shader_jit = configuration.useShaderJIT && jit;
+    _jitFallback = configuration.useCPUJIT && !jit;
     values.cpu_clock_percentage = static_cast<s32>(configuration.cpuClockPercentage);
 
     values.resolution_factor = static_cast<u32>(configuration.resolutionFactor);
@@ -547,6 +667,7 @@ const char* ThermalStateName() {
     quality.vertex_fast_math = configuration.vertexFastMath;
     quality.texture_pool = configuration.texturePool;
     quality.vertex_depth = configuration.hiddenSurfaceRemoval;
+    quality.conservative_w_depth = configuration.fastWBufferDepth;
     quality.draw_optimizations = configuration.drawOptimizations;
     quality.wait_for_gpu = configuration.waitForGPU;
     quality.gpu_pass_timing = configuration.gpuPassTiming;
@@ -564,6 +685,8 @@ const char* ThermalStateName() {
     // With display sync the display link owns the layer, so frame generation goes through it too.
     quality.display_sync = configuration.displaySync;
     quality.frame_cap = configuration.displaySync && configuration.frameCap30 ? 2 : 0;
+    quality.steady_thirty = configuration.displaySync && configuration.steadyThirty;
+    quality.present_every_refresh = configuration.displaySync && configuration.presentEveryRefresh;
     quality.frame_generation_display_paced =
         configuration.frameGenerationDisplayPaced || configuration.displaySync;
     // The emulation wakes up for each frame just after a refresh of the display (display sync).
@@ -724,6 +847,9 @@ const char* ThermalStateName() {
                  gpu_floor_us / 1000.0);
     }
     _secondaryLayoutMode = configuration.secondaryDisplayLayout;
+    _jitWarmup = configuration.jitWarmup;
+    _preloadGame = configuration.preloadGame;
+    _preloadGameCompressed = configuration.preloadGameCompressed;
     values.preload_textures = configuration.preloadTextures;
     values.dump_textures = configuration.dumpTextures;
 
@@ -1043,6 +1169,22 @@ const char* ThermalStateName() {
 - (NSError*)runEmulation:(const std::string&)filepath {
     Core::System& system = Core::System::GetInstance();
 
+    FileUtil::Preload::Clear();
+    if (_preloadGame && !IsArticPath(filepath)) {
+        _preloadProgress = 0.0;
+        const std::string problem =
+            PreloadGame(filepath, _preloadGameCompressed, _stopRequested, _preloadProgress);
+        if (!problem.empty()) {
+            NSString* message = [NSString stringWithUTF8String:problem.c_str()];
+            dispatch_async(dispatch_get_main_queue(), ^{
+              if (self.onToast) {
+                  self.onToast(message);
+              }
+            });
+        }
+        _preloadProgress = -1.0;
+    }
+
     u64 program_id{};
     FileUtil::SetCurrentRomPath(filepath);
     auto app_loader = Loader::GetLoader(filepath);
@@ -1117,9 +1259,21 @@ const char* ThermalStateName() {
     system.RegisterCoreLoopThreadId();
     Common::FrameCost::MarkEmulationThread();
 #if defined(__aarch64__)
-    // The JIT reports how long compiling each new block of game code takes (a patch of dynarmic).
-    Dynarmic::g_block_compile_hook = [](std::uint64_t nanoseconds) {
-        if (Common::FrameCost::t_emulation_thread) {
+    if (_jitFallback) {
+        // The app already tells the user JIT is missing when it opens, the log notes it here.
+        LOG_WARNING(Frontend, "JIT is not enabled: the game runs with the fast interpreter");
+    }
+    // The blocks of game code compiled in earlier runs, compiled ahead of time in this one. Next
+    // to the shader cache, so Clear Shader Cache clears it too.
+    JitWarmup::Start(system,
+                     fmt::format("{}metal/jit/{:016X}.bin",
+                                 FileUtil::GetUserPath(FileUtil::UserPath::ShaderDir), program_id),
+                     _jitWarmup && Settings::values.use_cpu_jit.GetValue());
+    // The JIT reports each new block of game code and how long compiling it took (a patch of
+    // dynarmic): for the slow frame log and the warm-up's profile.
+    Dynarmic::g_block_compile_hook = [](std::uint64_t descriptor, std::uint64_t nanoseconds) {
+        const bool ahead_of_time = JitWarmup::OnBlockCompiled(descriptor, nanoseconds);
+        if (!ahead_of_time && Common::FrameCost::t_emulation_thread) {
             Common::FrameCost::Add(Common::FrameCost::Kind::JitCompile, nanoseconds);
         }
     };
@@ -1239,6 +1393,7 @@ const char* ThermalStateName() {
         if (now - last_stats_time >= std::chrono::seconds(1)) {
             const double window = std::chrono::duration<double>(now - last_stats_time).count();
             last_stats_time = now;
+            JitWarmup::Tick();
             const auto stats = system.GetAndResetPerfStats();
             _speed = stats.emulation_speed * 100.0;
             _fps = stats.game_fps;
@@ -1291,6 +1446,7 @@ const char* ThermalStateName() {
             }
         }
     }
+    JitWarmup::Stop();
     return error;
 }
 
@@ -1301,6 +1457,8 @@ const char* ThermalStateName() {
     // Saves a recording that is still going.
     Core::System::GetInstance().Movie().Shutdown();
     Core::System::GetInstance().Shutdown();
+    // The game's files are closed: the memory of a preloaded game is released now.
+    FileUtil::Preload::Clear();
     _speed = 0.0;
     _fps = 0.0;
     _displayFps = 0.0;
@@ -1369,6 +1527,27 @@ const char* ThermalStateName() {
 
 - (void)setAnalog:(AZAnalog)analog x:(float)x y:(float)y {
     IOSInput::SetAnalog(static_cast<int>(analog), x, y);
+}
+
+- (NSArray<NSNumber*>*)currentScreenFractions {
+    if (!_window) {
+        return nil;
+    }
+    const auto layout = _window->GetFramebufferLayout();
+    if (layout.width == 0 || layout.height == 0) {
+        return nil;
+    }
+    const auto fraction = [](u32 value, u32 extent) {
+        return @(static_cast<double>(value) / static_cast<double>(extent));
+    };
+    const auto& top = layout.top_screen;
+    const auto& bottom = layout.bottom_screen;
+    return @[
+        fraction(top.left, layout.width), fraction(top.top, layout.height),
+        fraction(top.GetWidth(), layout.width), fraction(top.GetHeight(), layout.height),
+        fraction(bottom.left, layout.width), fraction(bottom.top, layout.height),
+        fraction(bottom.GetWidth(), layout.width), fraction(bottom.GetHeight(), layout.height)
+    ];
 }
 
 - (CGRect)bottomScreenFrame {

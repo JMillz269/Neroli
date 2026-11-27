@@ -124,6 +124,11 @@ struct QualityOptions {
     /// Map the depth in the vertex shader so fragment shaders do not write it, which keeps the
     /// hidden surface removal of Apple GPUs working (not for W-buffering).
     bool vertex_depth = false;
+    /// W-buffered draws keep the GPU's early depth test: the vertices go to their exact W-buffer
+    /// depth and the fragment shader writes the exact depth with a conservative output, see
+    /// MSL::MetalFSConfig::conservative_w_depth. Experimental: an unusual projection could hide
+    /// pixels that should show.
+    bool conservative_w_depth = false;
     /// Draw-time optimizations: depth/stencil-only draws without a fragment function, the
     /// scissor test inside the box as the GPU scissor rectangle, and blending that keeps the
     /// source color drawn unblended. Off draws as before they existed.
@@ -190,6 +195,16 @@ struct QualityOptions {
     /// With display sync, each new frame of the game is shown for this many of the 3DS's
     /// refreshes (2: a steady 30 FPS), whatever its own timing was. 0 follows the game.
     int frame_cap = 0;
+    /// With display sync and no frame cap: once the game is seen drawing at 30 FPS (a new frame
+    /// every second refresh of the 3DS, counted in emulated time), each of its frames is shown for
+    /// two refreshes, as with frame_cap 2, until it draws at 60 again. Without it a 30 FPS game
+    /// that hands over its frames unevenly (one after 1 refresh, the next after 3) judders.
+    bool steady_thirty = false;
+    /// With display sync: the display link presents the frame on screen again at every refresh
+    /// that has no new frame, so a ProMotion display stays at the refresh rate asked for (it may
+    /// slow down while a 30 FPS game presents only every fourth refresh at 120 Hz). Costs a small
+    /// copy of the screen per refresh.
+    bool present_every_refresh = false;
     /// Frame generation with MetalFX's own frame interpolator instead of VideoToolbox's.
     bool frame_generation_metalfx = false;
     /// Frames of frame generation are shown by a display link at the display's refreshes.

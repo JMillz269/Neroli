@@ -110,6 +110,19 @@ struct MetalFSConfig {
     /// lookup instead of a load and the interpolation in the shader. fs.lighting_lut_offset holds
     /// the row of each table. The ends of a table are clamped instead of extrapolated.
     bool lut_texture = false;
+    /// W-buffered depth with a conservative depth output (QualityOptions::conservative_w_depth):
+    /// 0 off, 1 [[depth(less)]], 2 [[depth(greater)]]. The vertex shader puts each vertex at its
+    /// exact W-buffer depth (VSDepthData::w_buffer), the fragment shader still writes the exact
+    /// depth (VSOutput::w_depth, interpolated with perspective correction, clamped to the promise),
+    /// and promises the GPU on which side of the rasterized depth it is so hidden fragments can be
+    /// rejected before shading.
+    u8 conservative_w_depth = 0;
+    /// 2D textures are sampled with the GPU's own level of detail (from the screen-space
+    /// derivatives, plus the PICA LOD bias) instead of the PICA formula computed in the shader
+    /// and passed as an explicit level. An explicit level turns off the sampler's anisotropic
+    /// filtering, so this is set while anisotropic filtering is on. The GPU's formula can pick a
+    /// slightly different mip level than the PICA's on surfaces seen at an angle.
+    bool hardware_lod = false;
 };
 
 /// MSL of FixQuaternion(float4 interpolated, float3 barycentric), which corrects opposite
@@ -124,7 +137,9 @@ struct VSDepthData {
     float scale;
     float offset;
     u32 enabled;
-    u32 pad;
+    /// W-buffering (MetalFSConfig::conservative_w_depth): the clip space Z is that depth times w,
+    /// so the rasterized depth is the W-buffer depth at each vertex.
+    u32 w_buffer;
 };
 
 /**

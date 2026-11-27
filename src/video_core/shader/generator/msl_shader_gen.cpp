@@ -68,7 +68,7 @@ struct VSDepth {
     float scale;
     float offset;
     uint enabled;
-    uint pad;
+    uint w_buffer; // VSDepthData::w_buffer
 };
 
 struct VSUniforms {
@@ -151,6 +151,7 @@ struct VSOutput {
     float texcoord0_w [[user(texcoord0_w)]];
     float4 normquat [[user(normquat)]];
     float3 view [[user(view)]];
+    float w_depth [[user(w_depth)]]; // Exact W-buffer depth of the vertex, for the conservative depth
 #ifdef USE_CLIP_PLANES
     float clip_distance [[clip_distance]] [3];
 #endif
@@ -249,6 +250,9 @@ public:
         // writes depth through the shadow buffer image instead.
         write_fragment_depth = metal.has_depth_attachment && !config.framebuffer.shadow_rendering &&
                                !metal.vertex_depth;
+        conservative_depth =
+            write_fragment_depth && metal.conservative_w_depth != 0 &&
+            config.framebuffer.depthmap_enable == RasterizerRegs::DepthBuffering::WBuffering;
         quaternion_fix = metal.fragment_quaternion_fix && config.lighting.enable.Value() != 0;
         lut_texture = metal.lut_texture && config.lighting.enable.Value() != 0;
     }
@@ -271,10 +275,10 @@ public:
             input.replace(input.find(plain), plain.size(),
                           "float4 normquat [[user(normquat)]];\n"
                           "    float3 barycentric [[barycentric_coord, center_perspective]];");
-            out += input;
+            out += AddWDepth(input);
             out += QUATERNION_FIX_MSL;
         } else {
-            out += FSInputDef;
+            out += AddWDepth(std::string{FSInputDef});
         }
         DefineOutput();
         DefineConstants();
@@ -316,7 +320,11 @@ private:
         // Shadow rendering writes only through the shadow buffer image, and a [[depth]] output is
         // only legal when a depth attachment is bound.
         if (write_fragment_depth) {
-            out += "    float depth [[depth(any)]];\n";
+            // A conservative output keeps the early depth test, see MetalFSConfig.
+            out += conservative_depth ? (metal.conservative_w_depth == 1
+                                             ? "    float depth [[depth(less)]];\n"
+                                             : "    float depth [[depth(greater)]];\n")
+                                      : "    float depth [[depth(any)]];\n";
         }
         out += "};\n";
     }
@@ -381,6 +389,9 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         members.emplace_back("float", "texcoord0_w");
         members.emplace_back("float4", "normquat");
         members.emplace_back("float3", "view");
+        if (conservative_depth) {
+            members.emplace_back("float", "w_depth");
+        }
 
         for (const auto& [type, name] : members) {
             out += fmt::format("    {} {};\n", type, name);
@@ -470,7 +481,7 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
                 arg = "normquat";
             } else if (name == "texcoord0" || name == "texcoord1" ||
                        name == "texcoord2" || name == "texcoord0_w" || name == "normquat" ||
-                       name == "view") {
+                       name == "view" || name == "w_depth") {
                 arg = "in." + name;
             }
             out += fmt::format("{}{}", i == 0 ? "" : ", ", arg);
@@ -970,6 +981,11 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         }
 
         const auto sample_2d = [&](u32 unit, u32 coord) {
+            if (metal.hardware_lod) {
+                return fmt::format("        return tex{0}.sample(samp{0}, texcoord{1}, "
+                                   "bias(fs.tex_lod_bias[{0}]));\n",
+                                   unit, coord);
+            }
             return fmt::format("        return tex{0}.sample(samp{0}, texcoord{1}, "
                                "level(getLod(texcoord{1} * float2(tex{0}.get_width(), "
                                "tex{0}.get_height())) + fs.tex_lod_bias[{0}]));\n",
@@ -1373,6 +1389,21 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         if (metal.vertex_depth) {
             // The vertex shader already produced the final depth, see VSDepthData.
             out += "        float depth = frag_coord.z;\n";
+            return;
+        }
+        if (conservative_depth) {
+            // The rasterized depth is the W-buffer depth at the vertices interpolated linearly
+            // on the screen (VSDepthData::w_buffer). The exact depth, (z / w * scale + offset) * w
+            // = z * scale + offset * w, is affine in the clip coordinates, so it is the vertex
+            // depth interpolated with perspective correction, which the GPU does for w_depth.
+            out += "        float depth = w_depth;\n";
+            // The promise of [[depth(less)]] / [[depth(greater)]] holds by construction for the
+            // usual projections (see ConservativeWDepth); float rounding, or a projection where it
+            // does not, could break it by a little. Clamped to the rasterized depth, a broken
+            // promise is a slightly wrong depth instead of undefined behaviour.
+            out += metal.conservative_w_depth == 1
+                       ? "        depth = min(depth, frag_coord.z);\n"
+                       : "        depth = max(depth, frag_coord.z);\n";
             return;
         }
         out += "        float z_over_w = -frag_coord.z;\n";
@@ -2028,6 +2059,17 @@ private:
     std::vector<std::pair<std::string, std::string>> ctor_members;
     bool use_framebuffer_fetch{};
     bool write_fragment_depth{};
+    bool conservative_depth{};
+
+    /// The fragment input with the interpolated W-buffer depth, when the depth needs it.
+    std::string AddWDepth(std::string input) const {
+        if (conservative_depth) {
+            const std::string_view view = "float3 view [[user(view)]];";
+            input.replace(input.find(view), view.size(),
+                          "float3 view [[user(view)]];\n    float w_depth [[user(w_depth)]];");
+        }
+        return input;
+    }
     /// The lighting quaternion is corrected per triangle here, see MetalFSConfig.
     bool quaternion_fix = false;
     /// The lighting LUTs are read through a filtered texture, see MetalFSConfig::lut_texture.
@@ -2092,8 +2134,14 @@ vertex VSOutput {}(VSInput in [[stage_in]], constant VSUniforms& vs [[buffer({})
     clip_pos.y = -clip_pos.y;
     if (vs_depth.enabled != 0u) {{
         clip_pos.z = vtx_pos.z * vs_depth.scale + vs_depth.offset * vtx_pos.w;
+        if (vs_depth.w_buffer != 0u) {{
+            clip_pos.z *= vtx_pos.w;
+        }}
     }}
     out.position = clip_pos;
+    // The exact W-buffer depth of the vertex (z / w * scale + offset) * w, interpolated with
+    // perspective correction for the conservative depth of the fragment shader.
+    out.w_depth = vtx_pos.z * vs_depth.scale + vs_depth.offset * vtx_pos.w;
 #ifdef USE_CLIP_PLANES
     out.clip_distance[0] = -vtx_pos.z; // fixed PICA clipping plane z <= 0
     out.clip_distance[1] = vs.enable_clip1 != 0 ? dot(vs.clip_coef, vtx_pos) : 0.0f;
@@ -2425,8 +2473,14 @@ vertex VSOutput {}(uint vid [[vertex_id]], constant VSUniforms& vs [[buffer({})]
     clip_pos.y = -clip_pos.y;
     if (vs_depth.enabled != 0u) {
         clip_pos.z = vtx_pos.z * vs_depth.scale + vs_depth.offset * vtx_pos.w;
+        if (vs_depth.w_buffer != 0u) {
+            clip_pos.z *= vtx_pos.w;
+        }
     }
     out.position = clip_pos;
+    // The exact W-buffer depth of the vertex (z / w * scale + offset) * w, interpolated with
+    // perspective correction for the conservative depth of the fragment shader.
+    out.w_depth = vtx_pos.z * vs_depth.scale + vs_depth.offset * vtx_pos.w;
 #ifdef USE_CLIP_PLANES
     out.clip_distance[0] = -vtx_pos.z; // fixed PICA clipping plane z <= 0
     out.clip_distance[1] = vs.enable_clip1 != 0 ? dot(vs.clip_coef, vtx_pos) : 0.0f;

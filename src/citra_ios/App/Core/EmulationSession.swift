@@ -17,6 +17,8 @@ final class EmulationSession: ObservableObject {
     @Published private(set) var speed: Double = 0
     /// Progress of building the cached shaders while the game boots, nil when not building.
     @Published private(set) var shaderBuildProgress: Double?
+    /// Progress of reading the game into memory while it boots (Preload Game into Memory).
+    @Published private(set) var gamePreloadProgress: Double?
     /// Average GPU time and time the emulation thread waited for the GPU, per frame, in ms.
     @Published private(set) var gpuMs: Double = 0
     @Published private(set) var stallMs: Double = 0
@@ -49,6 +51,8 @@ final class EmulationSession: ObservableObject {
     private var pendingGame: Game?
     private var pendingSettings: AppSettings?
     private var statsTimer: Timer?
+    /// The settings of the running game, for the stats timer (whether the overlay is shown).
+    private weak var statsSettings: AppSettings?
 
     var isActive: Bool { currentGame != nil }
 
@@ -97,6 +101,11 @@ final class EmulationSession: ObservableObject {
         AZEmulator.shared.onNotice = { [weak self] title, message in
             Task { @MainActor in
                 self?.notice = SessionNotice(title: title, message: message)
+            }
+        }
+        AZEmulator.shared.onToast = { [weak self] message in
+            Task { @MainActor in
+                self?.showToast(message, seconds: 6)
             }
         }
     }
@@ -195,11 +204,11 @@ final class EmulationSession: ObservableObject {
 
     private var toastTask: Task<Void, Never>?
 
-    func showToast(_ text: String) {
+    func showToast(_ text: String, seconds: Double = 2) {
         toast = text
         toastTask?.cancel()
         toastTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             if !Task.isCancelled {
                 toast = nil
             }
@@ -260,19 +269,34 @@ final class EmulationSession: ObservableObject {
         if settings.useMotion {
             motion.start()
         }
+        statsSettings = settings
         statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.fps = AZEmulator.shared.framesPerSecond
-                self.displayFps = AZEmulator.shared.displayFramesPerSecond
-                self.speed = AZEmulator.shared.emulationSpeed
-                self.gpuMs = AZEmulator.shared.gpuMilliseconds
-                self.stallMs = AZEmulator.shared.stallMilliseconds
-                self.paceJitterMs = AZEmulator.shared.paceJitterMilliseconds
-                self.draws = AZEmulator.shared.drawsPerFrame
+                // Only what changed is set: every set of a published value redraws the views of
+                // the game screen on the main thread, which competes with the emulation for the
+                // CPU. The numbers change once a second, and are only needed for the overlay.
+                if self.statsSettings?.showPerformanceOverlay ?? true {
+                    self.setIfChanged(\.fps, AZEmulator.shared.framesPerSecond)
+                    self.setIfChanged(\.displayFps, AZEmulator.shared.displayFramesPerSecond)
+                    self.setIfChanged(\.speed, AZEmulator.shared.emulationSpeed)
+                    self.setIfChanged(\.gpuMs, AZEmulator.shared.gpuMilliseconds)
+                    self.setIfChanged(\.stallMs, AZEmulator.shared.stallMilliseconds)
+                    self.setIfChanged(\.paceJitterMs, AZEmulator.shared.paceJitterMilliseconds)
+                    self.setIfChanged(\.draws, AZEmulator.shared.drawsPerFrame)
+                }
                 let progress = AZEmulator.shared.shaderBuildProgress
-                self.shaderBuildProgress = progress >= 0 ? progress : nil
+                self.setIfChanged(\.shaderBuildProgress, progress >= 0 ? progress : nil)
+                let preload = AZEmulator.shared.gamePreloadProgress
+                self.setIfChanged(\.gamePreloadProgress, preload >= 0 ? preload : nil)
             }
+        }
+    }
+
+    private func setIfChanged<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<EmulationSession, Value>,
+                                                _ value: Value) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
         }
     }
 

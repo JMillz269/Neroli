@@ -21,6 +21,7 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
     AZPortraitLayoutOptionTopFullWidth = 0,
     AZPortraitLayoutOptionCustom = 1,
     AZPortraitLayoutOptionOriginal = 2,
+    AZPortraitLayoutOptionFold = 3,
 };
 
 /// Subset of the emulator settings exposed to the iOS frontend. The app persists these and hands
@@ -29,6 +30,15 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 
 // CPU
 @property(nonatomic) BOOL useCPUJIT;
+/// With the CPU JIT: the blocks of game code compiled in earlier runs of a game are compiled
+/// ahead of time, while the game waits for the next frame, instead of when it first needs them.
+@property(nonatomic) BOOL jitWarmup;
+/// The game file is read into memory before the game starts (decompressed, when it is a
+/// compressed file), and the game reads from there. Skipped when iOS has too little memory left.
+@property(nonatomic) BOOL preloadGame;
+/// With preloadGame: a compressed game is kept in memory as it is stored (less memory), and is
+/// still decompressed as it is read.
+@property(nonatomic) BOOL preloadGameCompressed;
 @property(nonatomic) NSInteger cpuClockPercentage;
 
 // Graphics
@@ -104,6 +114,8 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL texturePool;
 /// Depth mapped in the vertex shader so the GPU's hidden surface removal works (next game).
 @property(nonatomic) BOOL hiddenSurfaceRemoval;
+/// W-buffered draws keep the GPU's early depth test (conservative depth), experimental.
+@property(nonatomic) BOOL fastWBufferDepth;
 /// Depth/stencil-only draws without a fragment function, the scissor test as the GPU's scissor
 /// rectangle and no-op blending dropped. Off draws the way it was done before.
 @property(nonatomic) BOOL drawOptimizations;
@@ -128,6 +140,13 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 /// With displaySync, every new frame of the game is shown for two of the 3DS's refreshes: a steady
 /// 30 FPS for games that run at 30 but hand over their frames unevenly.
 @property(nonatomic) BOOL frameCap30;
+/// With displaySync and without frameCap30: while the game draws at 30 FPS, each of its frames is
+/// shown for two refreshes like with the cap (the game itself is not held), and it follows the
+/// game again once that draws faster.
+@property(nonatomic) BOOL steadyThirty;
+/// With displaySync: the frame on screen is presented again at every refresh without a new frame,
+/// so a ProMotion display does not slow down between the frames of a 30 FPS game.
+@property(nonatomic) BOOL presentEveryRefresh;
 /// With frameCap30, the game itself also runs at 30: its 3D work never finishes within one
 /// refresh, so games that adapt their frame rate do not make frames the cap would throw away.
 @property(nonatomic) BOOL frameCapHoldsGame;

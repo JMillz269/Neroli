@@ -122,13 +122,19 @@ struct GameSettingsView: View {
                                options: RefreshRateOption.allCases.map(\.rawValue)) {
                     RefreshRateOption(rawValue: $0)?.title ?? "\($0) Hz"
                 }
+                OverrideToggle("Steady 30 FPS", value: $overrides.steadyThirty)
+                OverrideToggle("Present Every Refresh", value: $overrides.presentEveryRefresh)
                 OverrideToggle("30 FPS Frame Cap", value: $overrides.frameCap30)
                 OverrideToggle("Frame Cap: Run Game at 30", value: $overrides.frameCapHoldsGame)
                 OverridePicker("Frame Pacing Buffer", value: $overrides.pacingBufferMs,
                                options: [0, 8, 17, 25]) { $0 == 0 ? "Off" : "\($0) ms" }
                 OverrideToggle("Custom Textures", value: $overrides.customTextures)
                 OverrideToggle("Preload Custom Textures", value: $overrides.preloadTextures)
+                OverrideToggle("Preload Game into Memory", value: $overrides.preloadGame)
+                OverrideToggle("Preload: Keep Compressed", value: $overrides.preloadGameCompressed)
                 OverrideToggle("Hidden Surface Removal", value: $overrides.hiddenSurfaceRemoval)
+                OverrideToggle("Fast W-Buffer Depth (Experimental)",
+                               value: $overrides.fastWBufferDepth)
                 OverrideToggle("Draw Optimizations", value: $overrides.drawOptimizations)
                 OverridePicker("Texture Compression", value: $overrides.textureCompression,
                                options: TextureCompressionOption.allCases.map(\.rawValue)) {
@@ -196,11 +202,12 @@ struct GameSettingsView: View {
                 }
             } header: {
                 InfoHeader("System") {
-                    Text("Rows set to Default follow the global settings. Opened from the game menu, "
-                         + "changes apply to the running game right away where that is possible "
-                         + "(layout, speed, graphics options). Settings that change how the game "
-                         + "is set up (game hacks, shader options, the region, plugins and the "
-                         + "like) apply the next time the game starts.")
+                    HelpList([
+                        HelpItem(note: "Rows set to Default follow the global settings. Opened from the game menu, changes apply to the running game right away where that is possible (layout, speed, graphics options). Settings that change how the game is set up (game hacks, shader options, the region, plugins and the like) apply the next time the game starts."),
+                        HelpItem("New 3DS Mode", "Runs the game as on a New 3DS (faster processor, more memory). Some games need it; most run either way."),
+                        HelpItem("LLE Applets, Plugin Loader, Nintendo Network Support", "The same as in Settings › System, for this game."),
+                        HelpItem("Region-Free Patch, Region", "Lets the game run on a console of another region, or sets the console's region for this game."),
+                    ])
                 }
             }
 
@@ -226,8 +233,7 @@ struct GameSettingsView: View {
                 }
             } header: {
                 InfoHeader("Game Hacks") {
-                    Text(GameHack.allCases.map { "\($0.title): \($0.details)" }
-                            .joined(separator: "\n\n"))
+                    HelpList(GameHack.allCases.map { HelpItem($0.title, $0.details) })
                 }
             }
 
@@ -240,8 +246,9 @@ struct GameSettingsView: View {
                 }
             } header: {
                 InfoHeader("Controller") {
-                    Text("Uses a saved controller profile for this game. Create profiles in "
-                         + "Settings › Controller Mapping.")
+                    HelpList([
+                        HelpItem("Controller Profile", "Uses a saved controller profile for this game. Create profiles in Settings › Controller Mapping."),
+                    ])
                 }
             }
 

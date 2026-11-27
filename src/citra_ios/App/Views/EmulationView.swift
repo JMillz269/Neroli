@@ -204,9 +204,9 @@ struct EmulationView: View {
             .allowsHitTesting(false)
         }
 
-        if let progress = session.shaderBuildProgress {
+        if let progress = session.gamePreloadProgress ?? session.shaderBuildProgress {
             VStack(spacing: 8) {
-                Text("Building Shaders")
+                Text(session.gamePreloadProgress != nil ? "Loading Game into Memory" : "Building Shaders")
                     .font(.headline)
                 ProgressView(value: progress)
                     .frame(width: 180)
@@ -224,9 +224,14 @@ struct EmulationView: View {
                 Spacer()
                 Text(toast)
                     .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 440)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    // A capsule for a line, rounded corners for a longer message that wraps.
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 24)
             }
             .allowsHitTesting(false)
@@ -432,6 +437,16 @@ extension EmulationView {
     /// Switches the current orientation to the custom layout and lets the screens be moved.
     fileprivate func beginEditingScreens() {
         let portrait = UIScreen.main.bounds.height > UIScreen.main.bounds.width
+        // Coming from another layout (Fold, Top Full Width, ...), the editor starts from where the
+        // screens are now instead of an older custom layout, so they can be nudged from there.
+        let wasCustom = portrait ? settings.portraitLayout == .custom : settings.layout == .custom
+        if !wasCustom, let current = AZEmulator.shared.currentScreenFractions {
+            if portrait {
+                settings.customLayoutPortrait = current.map(\.doubleValue)
+            } else {
+                settings.customLayoutLandscape = current.map(\.doubleValue)
+            }
+        }
         if portrait {
             settings.portraitLayout = .custom
         } else {

@@ -56,6 +56,7 @@ enum PortraitScreenLayout: Int, CaseIterable, Identifiable {
     case topFullWidth = 0
     case custom = 1
     case original = 2
+    case fold = 3
 
     var id: Int { rawValue }
     var title: String {
@@ -63,6 +64,7 @@ enum PortraitScreenLayout: Int, CaseIterable, Identifiable {
         case .topFullWidth: return "Top Full Width"
         case .custom: return "Custom"
         case .original: return "Original"
+        case .fold: return "Fold (Top and Bottom Half)"
         }
     }
 }
@@ -239,6 +241,12 @@ final class AppSettings: ObservableObject {
 
     // CPU
     @Published var cpuJIT: Bool { didSet { save(cpuJIT, "cpuJIT") } }
+    /// Compile the game code seen in earlier runs ahead of time (fewer stutters in known scenes).
+    @Published var jitWarmup: Bool { didSet { save(jitWarmup, "jitWarmup") } }
+    /// Read the game into memory (decompressed) before it starts.
+    @Published var preloadGame: Bool { didSet { save(preloadGame, "preloadGame") } }
+    /// With preloadGame: keep a compressed game compressed in memory (less memory).
+    @Published var preloadGameCompressed: Bool { didSet { save(preloadGameCompressed, "preloadGameCompressed") } }
     @Published var cpuClockPercentage: Int { didSet { save(cpuClockPercentage, "cpuClockPercentage") } }
 
     // Graphics
@@ -260,6 +268,10 @@ final class AppSettings: ObservableObject {
     @Published var displaySync: Bool { didSet { save(displaySync, "displaySync") } }
     /// Each new game frame is shown for two 3DS refreshes (steady 30 FPS), with display sync.
     @Published var frameCap30: Bool { didSet { save(frameCap30, "frameCap30") } }
+    /// Without the cap: a game seen drawing at 30 FPS has each frame shown for two refreshes too.
+    @Published var steadyThirty: Bool { didSet { save(steadyThirty, "steadyThirty") } }
+    /// The frame on screen is presented again at every refresh (keeps ProMotion at full rate).
+    @Published var presentEveryRefresh: Bool { didSet { save(presentEveryRefresh, "presentEveryRefresh") } }
     /// With the cap, the game itself also runs at 30 (its 3D work never finishes within a refresh).
     @Published var frameCapHoldsGame: Bool { didSet { save(frameCapHoldsGame, "frameCapHoldsGame") } }
     /// Delay in milliseconds that the pacing adds so a slow frame still meets its slot.
@@ -315,6 +327,7 @@ final class AppSettings: ObservableObject {
     /// Draw-time optimizations (no fragment function for depth-only draws, hardware scissor,
     /// no-op blending dropped).
     @Published var drawOptimizations: Bool { didSet { save(drawOptimizations, "drawOptimizations") } }
+    @Published var fastWBufferDepth: Bool { didSet { save(fastWBufferDepth, "fastWBufferDepth") } }
     /// MSAA: 0 off, 1 2x, 2 4x, 3 8x.
     @Published var antiAliasing: Int { didSet { save(antiAliasing, "antiAliasing") } }
     @Published var waitForGPU: Bool { didSet { save(waitForGPU, "waitForGPU") } }
@@ -473,10 +486,10 @@ final class AppSettings: ObservableObject {
         func value<T>(_ key: String, _ fallback: T) -> T { d.object(forKey: key) as? T ?? fallback }
 
         libraryStyle = LibraryStyle(rawValue: value("libraryStyle", LibraryStyle.grid.rawValue)) ?? .grid
-        showPerformanceOverlay = value("showPerformanceOverlay", true)
+        showPerformanceOverlay = value("showPerformanceOverlay", false)
         hideControllerWithHardware = value("hideControllerWithHardware", true)
         builtInJIT = value("builtInJIT", false)
-        autoEnableJIT = value("autoEnableJIT", false)
+        autoEnableJIT = value("autoEnableJIT", true)
         jitDebuggerName = value("jitDebugger", JITDebugger.stikDebug.rawValue)
         jitCustomURL = value("jitCustomURL", "")
         showHomeButton = value("showHomeButton", true)
@@ -485,11 +498,14 @@ final class AppSettings: ObservableObject {
         showSwapButton = value("showSwapButton", true)
         controllerOpacity = value("controllerOpacity", 0.7)
         hapticFeedback = value("hapticFeedback", true)
-        glassControls = value("glassControls", true)
+        glassControls = value("glassControls", false)
         glassControlTint = value("glassControlTint", 0.3)
         useMotion = value("useMotion", true)
 
         cpuJIT = value("cpuJIT", true)
+        jitWarmup = value("jitWarmup", true)
+        preloadGame = value("preloadGame", false)
+        preloadGameCompressed = value("preloadGameCompressed", false)
         cpuClockPercentage = value("cpuClockPercentage", 100)
 
         shaderJIT = value("shaderJIT", true)
@@ -498,7 +514,7 @@ final class AppSettings: ObservableObject {
         resolutionFactor = value("resolutionFactor", 2)
         linearFiltering = value("linearFiltering", true)
         textureFilter = TextureFilterOption(rawValue: value("textureFilter", 0)) ?? .none
-        skipDuplicateFrames = value("skipDuplicateFrames", false)
+        skipDuplicateFrames = value("skipDuplicateFrames", true)
         outerCamera = CameraSource(rawValue: value("outerCamera", 0)) ?? .off
         innerCamera = CameraSource(rawValue: value("innerCamera", 0)) ?? .off
         stereoMode = StereoModeOption(rawValue: value("stereoMode", 0)) ?? .off
@@ -508,6 +524,8 @@ final class AppSettings: ObservableObject {
         framePacing = value("framePacing", true)
         displaySync = value("displaySync", true)
         frameCap30 = value("frameCap30", false)
+        steadyThirty = value("steadyThirty", true)
+        presentEveryRefresh = value("presentEveryRefresh", true)
         frameCapHoldsGame = value("frameCapHoldsGame", true)
         pacingBufferMs = value("pacingBufferMs", 0)
         asyncShaders = value("asyncShaders", true)
@@ -522,27 +540,28 @@ final class AppSettings: ObservableObject {
         frameGenerationMetalFX = value("frameGenerationMetalFX", false)
         frameGenerationAllGames = value("frameGenerationAllGames", false)
         shaderWaitMs = value("shaderWaitMs", 2)
-        fastShaderMath = value("fastShaderMath", false)
-        fastLighting = value("fastLighting", false)
-        fastLightingLookups = value("fastLightingLookups", false)
-        fastColor = value("fastColor", false)
+        fastShaderMath = value("fastShaderMath", true)
+        fastLighting = value("fastLighting", true)
+        fastLightingLookups = value("fastLightingLookups", true)
+        fastColor = value("fastColor", true)
         loggingEnabled = value("loggingEnabled", false)
-        fastMathFunctions = value("fastMathFunctions", false)
-        halfInterpolants = value("halfInterpolants", false)
-        untrackedBuffers = value("untrackedBuffers", false)
-        vertexReuse = value("vertexReuse", false)
-        vertexFastFunctions = value("vertexFastFunctions", false)
-        vertexFastMath = value("vertexFastMath", false)
-        texturePool = value("texturePool", false)
-        fastDepthReadback = value("fastDepthReadback", false)
-        hiddenSurfaceRemoval = value("hiddenSurfaceRemoval", false)
+        fastMathFunctions = value("fastMathFunctions", true)
+        halfInterpolants = value("halfInterpolants", true)
+        untrackedBuffers = value("untrackedBuffers", true)
+        vertexReuse = value("vertexReuse", true)
+        vertexFastFunctions = value("vertexFastFunctions", true)
+        vertexFastMath = value("vertexFastMath", true)
+        texturePool = value("texturePool", true)
+        fastDepthReadback = value("fastDepthReadback", true)
+        hiddenSurfaceRemoval = value("hiddenSurfaceRemoval", true)
         drawOptimizations = value("drawOptimizations", true)
+        fastWBufferDepth = value("fastWBufferDepth", true)
         antiAliasing = value("antiAliasing", 0)
         waitForGPU = value("waitForGPU", true)
         gpuPassTiming = value("gpuPassTiming", false)
         dumpShaders = value("dumpShaders", false)
         textureCompression = TextureCompressionOption(rawValue: value("textureCompression", 0)) ?? .off
-        anisotropy = value("anisotropy", 4)
+        anisotropy = value("anisotropy", 1)
         diskShaderCache = value("diskShaderCache", true)
         upscaling = UpscalingOption(rawValue: value("upscaling", 0)) ?? .off
         upscaleFactorTenths = value("upscaleFactorTenths", 0)
@@ -566,7 +585,7 @@ final class AppSettings: ObservableObject {
         customLayoutPortrait = value("customLayoutPortrait", [Double]())
         useExternalDisplay = value("useExternalDisplay", true)
         secondaryDisplayLayout = value("secondaryDisplayLayout", 0)
-        disableRightEyeRender = value("disableRightEyeRender", false)
+        disableRightEyeRender = value("disableRightEyeRender", true)
         integerScaling = value("integerScaling", false)
         asyncCustomTextures = value("asyncCustomTextures", true)
         deterministicAsync = value("deterministicAsync", false)
@@ -670,6 +689,9 @@ final class AppSettings: ObservableObject {
         config.stereoDepth = stereoDepth
         config.swapEyes3D = swapEyes3D
         config.useCPUJIT = cpuJIT
+        config.jitWarmup = jitWarmup
+        config.preloadGame = preloadGame
+        config.preloadGameCompressed = preloadGameCompressed
         config.cpuClockPercentage = cpuClockPercentage
         config.useShaderJIT = shaderJIT
         config.useHardwareShaders = hardwareShaders
@@ -697,6 +719,8 @@ final class AppSettings: ObservableObject {
         config.framePacing = framePacing
         config.displaySync = displaySync
         config.frameCap30 = frameCap30
+        config.steadyThirty = steadyThirty
+        config.presentEveryRefresh = presentEveryRefresh
         config.frameCapHoldsGame = frameCapHoldsGame
         config.pacingBufferMs = pacingBufferMs
         config.fastShaderMath = fastShaderMath
@@ -714,6 +738,7 @@ final class AppSettings: ObservableObject {
         config.fastDepthReadback = fastDepthReadback
         config.hiddenSurfaceRemoval = hiddenSurfaceRemoval
         config.drawOptimizations = drawOptimizations
+        config.fastWBufferDepth = fastWBufferDepth
         config.antiAliasing = antiAliasing
         config.waitForGPU = waitForGPU
         config.gpuPassTiming = gpuPassTiming

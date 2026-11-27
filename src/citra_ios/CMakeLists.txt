@@ -36,6 +36,8 @@ add_library(azahar_ios_bridge STATIC
     Bridge/emu_window_ios.h
     Bridge/input_ios.cpp
     Bridge/input_ios.h
+    Bridge/jit_warmup.cpp
+    Bridge/jit_warmup.h
     Bridge/include/AzaharCore/AzaharCore.h
     Bridge/include/AzaharCore/AZConfiguration.h
     Bridge/include/AzaharCore/AZEmulator.h
@@ -62,6 +64,11 @@ target_link_libraries(azahar_ios_bridge PRIVATE
     "-framework Foundation" "-framework Metal" "-framework QuartzCore" "-weak_framework MetalFX"
     "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo"
 )
+# The JIT warm-up (Bridge/jit_warmup.cpp) calls into dynarmic through ARM_Dynarmic, whose header
+# includes dynarmic's. citra_core links it privately, so its include path does not reach here.
+if (TARGET dynarmic)
+    target_link_libraries(azahar_ios_bridge PRIVATE dynarmic)
+endif()
 
 set_target_properties(azahar_ios_bridge PROPERTIES
     XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
@@ -87,6 +94,7 @@ set(APP_SWIFT_SOURCES
     App/Core/EmulationSession.swift
     App/Core/FileLocations.swift
     App/Core/GameCompressor.swift
+    App/Core/BundleMaker.swift
     App/Core/GameSettings.swift
     App/Core/GameLibrary.swift
     App/Core/GameStats.swift

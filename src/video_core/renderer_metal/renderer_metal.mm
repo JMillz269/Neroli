@@ -64,6 +64,8 @@ struct DisplayPacer {
         /// not wait behind the next frames of the game on the GPU.
         id<MTLEvent> event = nil;
         u64 value = 0;
+        /// Already waited a refresh for its GPU work (see the display link's delegate).
+        bool deferred = false;
     };
     std::mutex mutex;
     std::deque<Frame> waiting;
@@ -82,6 +84,16 @@ struct DisplayPacer {
     bool missed_this_frame = false;
     double queued_sum = 0.0; ///< Frames waiting when one was taken, summed
     std::atomic<u32> presented_late{0};
+    /// Frames that never reached the screen (presentation time 0): with Present Every Refresh the
+    /// repeat of the next refresh got there first, so the frame was shown a refresh late.
+    std::atomic<u32> presented_dropped{0};
+    /// When a frame last reached the screen later than asked (presentation time), 0 for never.
+    std::atomic<double> last_late{0.0};
+    u32 deferred = 0; ///< Frames that waited a refresh for their GPU work, this second
+    /// Present the frame on screen again at every refresh without a new one
+    /// (QualityOptions::present_every_refresh), and that frame.
+    bool repeat_frames = false;
+    Frame on_screen;
     u32 late_seconds = 0; ///< Seconds in a row with frames shown late
     double last_log = 0.0;
     /// Draws a frame over the whole drawable.
@@ -110,6 +122,7 @@ API_AVAILABLE(ios(17.0), macos(14.0), tvos(17.0))
     const double target = update.targetPresentationTimestamp;
     Metal::NoteDisplayCallback(CACurrentMediaTime(), target);
     Metal::DisplayPacer::Frame next;
+    bool repeat = false;
     {
         std::scoped_lock lock{p->mutex};
         // Behind (the game or the interpolation hitched): keep only the newest pair (plus the one
@@ -122,15 +135,18 @@ API_AVAILABLE(ios(17.0), macos(14.0), tvos(17.0))
             p->last_log = target;
         } else if (target - p->last_log >= 1.0) {
             const u32 late = p->presented_late.exchange(0);
+            const u32 dropped = p->presented_dropped.exchange(0);
             // Only seconds with something to report: a frame missing or late.
-            if (p->not_ready > 0 || late > 0) {
+            if (p->not_ready > 0 || late > 0 || dropped > 0 || p->deferred > 0) {
                 LOG_INFO(Render,
                          "Display link: {} refreshes, {} frames shown ({:.1f} waiting on "
                          "average), {} times no frame was ready when one was due, {} shown at a "
-                         "later refresh than asked (lead {:.0f} refreshes)",
+                         "later refresh than asked and {} overtaken by a repeat (lead {:.0f} "
+                         "refreshes), {} waited a refresh for the GPU",
                          p->refreshes, p->shown, p->shown > 0 ? p->queued_sum / p->shown : 0.0,
-                         p->not_ready, late, link.preferredFrameLatency);
+                         p->not_ready, late, dropped, link.preferredFrameLatency, p->deferred);
             }
+            p->deferred = 0;
             p->refreshes = 0;
             p->shown = 0;
             p->not_ready = 0;
@@ -147,23 +163,51 @@ API_AVAILABLE(ios(17.0), macos(14.0), tvos(17.0))
         if (!p->primed) {
             p->primed = p->waiting.size() >= p->min_waiting;
         }
-        if (p->waiting.empty() || !due || !p->primed) {
+        bool take = !p->waiting.empty() && due && p->primed;
+        // A frame held for several refreshes (30 FPS) reached the screen late a moment ago: its
+        // GPU work was not done in time (the GPU lowers its clock when it is idle half the time,
+        // as at 30 FPS). Then a frame whose GPU work is not finished yet waits one refresh, once,
+        // which moves the frames a refresh later for good instead of one of them arriving late
+        // again and again. Not at 60 FPS, whose frames would all fall a refresh behind.
+        if (take) {
+            Metal::DisplayPacer::Frame& front = p->waiting.front();
+            if (!front.deferred && p->slot > 0.025 && front.event != nil &&
+                target - p->last_late.load(std::memory_order_relaxed) < 10.0 &&
+                [(id)front.event conformsToProtocol:@protocol(MTLSharedEvent)] &&
+                [(id<MTLSharedEvent>)front.event signaledValue] < front.value) {
+                front.deferred = true;
+                p->deferred++;
+                take = false;
+            }
+        }
+        if (take) {
+            p->queued_sum += static_cast<double>(p->waiting.size());
+            next = p->waiting.front();
+            p->waiting.pop_front();
+            p->shown_at = target;
+            p->shown++;
+            p->missed_this_frame = false;
+            p->on_screen = next;
+        } else if (p->repeat_frames && p->slot > 0.025 && p->on_screen.texture != nil) {
+            // The same picture again: the display keeps refreshing at the rate asked for instead
+            // of slowing down between the frames of a 30 FPS game (ProMotion), so the next new
+            // frame lands on the refresh it was meant for. Only for frames held three refreshes
+            // or more (30 FPS): at 60 FPS the display already gets a frame every second refresh,
+            // and a repeat in between, queued before the next frame, held that frame up in heavy
+            // scenes so the repeat after it went first (uneven 60 FPS in Fire Emblem battles).
+            next = p->on_screen;
+            repeat = true;
+        } else {
             return; // The frame on screen stays for this refresh
         }
-        p->queued_sum += static_cast<double>(p->waiting.size());
-        next = p->waiting.front();
-        p->waiting.pop_front();
-        p->shown_at = target;
-        p->shown++;
-        p->missed_this_frame = false;
     }
     id<CAMetalDrawable> drawable = update.drawable;
     if (drawable == nil || next.texture == nil) {
         return;
     }
-    const bool own_queue = next.event != nil && p->present_queue != nil;
+    const bool own_queue = (next.event != nil || repeat) && p->present_queue != nil;
     id<MTLCommandBuffer> buffer = [own_queue ? p->present_queue : p->command_queue commandBuffer];
-    if (own_queue) {
+    if (own_queue && next.event != nil && !repeat) {
         [buffer encodeWaitForEvent:next.event value:next.value];
     }
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -173,14 +217,25 @@ API_AVAILABLE(ios(17.0), macos(14.0), tvos(17.0))
     id<MTLRenderCommandEncoder> draw = [buffer renderCommandEncoderWithDescriptor:pass];
     p->draw(draw, next);
     [draw endEncoding];
+    if (repeat) {
+        // Not a frame of the game: not counted in the frame timing.
+        [buffer presentDrawable:drawable];
+        [buffer commit];
+        return;
+    }
     std::atomic<u32>* late = &p->presented_late;
     const std::shared_ptr<Metal::DisplayPacer> keep = p;
     [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
       Metal::RecordPresentedTime(presented.presentedTime);
-      if (presented.presentedTime > target + 0.002) {
+      if (presented.presentedTime <= 0.0) {
+          // Never shown: it was not ready at its refresh and the repeat of the next refresh
+          // (the same picture) went instead, a refresh late. Late as well for the GPU wait.
+          keep->presented_dropped.fetch_add(1, std::memory_order_relaxed);
+          keep->last_late.store(target, std::memory_order_relaxed);
+      } else if (presented.presentedTime > target + 0.002) {
           late->fetch_add(1, std::memory_order_relaxed);
+          keep->last_late.store(presented.presentedTime, std::memory_order_relaxed);
       }
-      (void)keep;
     }];
     [buffer presentDrawable:drawable];
     [buffer commit];
@@ -420,6 +475,9 @@ private:
     /// QualityOptions::display_sync. False when the display link could not be started.
     bool RenderDisplaySynced(CAMetalLayer* target, const Layout::FramebufferLayout& layout);
     void NoteFrameRhythm();
+    /// How many of the 3DS's refreshes each new frame of the game is shown for with display
+    /// sync: the frame cap, 2 while Steady 30 FPS sees a 30 FPS game, 0 to follow the game.
+    int FrameHold() const;
     /// When frame generation last made a pair of frames: the display link stays a little while
     /// after, so a short stretch without frame generation does not restart it.
     std::chrono::steady_clock::time_point fg_last_generated{};
@@ -538,10 +596,17 @@ private:
     // when they were not all the same (an uneven frame rhythm, see SwapBuffers).
     std::array<u32, 4> rhythm{};
     u32 rhythm_last_swaps{};
+    /// Steady 30 FPS (QualityOptions::steady_thirty): refreshes of the 3DS per new frame of the
+    /// game, smoothed, how many new frames in a row lasted a single refresh, and whether the game
+    /// counts as a 30 FPS game now.
+    f32 steady_cadence{1.0f};
+    u32 steady_short_run{};
+    bool steady_active{};
+    u32 steady_exit_swap{}; ///< fg_swaps when Steady 30 FPS last stopped
     std::chrono::steady_clock::time_point rhythm_start{};
-    /// Display sync: the pictures waiting for the display link or on screen (it keeps up to two
-    /// waiting and one shown, so four never overwrite one in use).
-    static constexpr u32 DS_COLORS = 4;
+    /// Display sync: the pictures waiting for the display link or on screen. One that is on screen
+    /// or waiting is never drawn over (see RenderDisplaySynced).
+    static constexpr u32 DS_COLORS = 6;
     std::array<id<MTLTexture>, DS_COLORS> ds_color{};
     u32 ds_index{};
     u32 ds_width{}, ds_height{};
@@ -1485,8 +1550,12 @@ void RendererMetal::AdaptFrameGeneration() {
     // Dropped frames alone (a hitch of the emulation, JIT compiling) are not the size's fault: only
     // when the made frames also take a good part of their time.
     const bool losing = dropped >= 4 && frame_ms > budget_ms * 0.6;
-    // A smaller size is worth trying already when the made frames come close to their time.
-    const bool behind = frame_ms > budget_ms * 0.8 || losing;
+    // A smaller size only when made frames are actually being lost (2 or more a second) while they
+    // take most of their time. Every size change rebuilds the interpolation (about 90 ms, the game
+    // stutters), and the GPU's clock alone can make the same frames take three times as long for
+    // a while: Dragon Quest VIII went between half and 3/8 every 20 to 60 seconds at 17-19 ms of
+    // a 16.7 ms budget with no frame lost.
+    const bool behind = (frame_ms > budget_ms * 0.8 && dropped >= 2) || losing;
     const bool ahead = frame_ms < budget_ms * 0.45 && dropped == 0;
     fga_behind = behind ? fga_behind + 1 : 0;
     fga_losing = losing ? fga_losing + 1 : 0;
@@ -1555,9 +1624,10 @@ void RendererMetal::AdaptFrameGeneration() {
         }
         return;
     }
-    // A size that was too slow within the last 30 seconds is not tried again yet.
-    constexpr auto RETRY_AFTER = std::chrono::seconds{30};
-    if (adaptive && fga_ahead >= 6 && fga_hold == 0 && fga_level > 0 &&
+    // A larger size after 15 seconds with plenty of room, and not within 2 minutes of being too
+    // slow (each change is a stutter, see above).
+    constexpr auto RETRY_AFTER = std::chrono::seconds{120};
+    if (adaptive && fga_ahead >= 15 && fga_hold == 0 && fga_level > 0 &&
         now - fga_too_slow_at[fga_level - 1] >= RETRY_AFTER) {
         fga_ahead = 0;
         fga_level--;
@@ -2648,6 +2718,30 @@ void RendererMetal::NoteFrameRhythm() {
         const u32 lasted = std::clamp(fg_swaps - rhythm_last_swaps, 1u, 4u);
         rhythm_last_swaps = fg_swaps;
         rhythm[lasted - 1]++;
+
+        // Steady 30 FPS. A 30 FPS game hands over a frame after 1 or 3 refreshes now and then
+        // (several times a second), which must not count as 60 FPS: it takes a smoothed cadence
+        // of 1.8 to start and below 1.4, or three single-refresh frames in a row, to stop.
+        steady_cadence = steady_cadence * 0.85f + static_cast<f32>(lasted) * 0.15f;
+        steady_short_run = lasted == 1 ? steady_short_run + 1 : 0;
+        const bool was_active = steady_active;
+        // Once stopped it waits 3 seconds of the game (180 refreshes) before starting again:
+        // scenes that switch between 30 and 60 FPS every few frames made it stop and start
+        // several times a second, and each switch is a small hitch.
+        constexpr u32 RESTART_AFTER_SWAPS = 180;
+        if (!steady_active) {
+            steady_active = steady_cadence >= 1.8f && lasted >= 2 &&
+                            fg_swaps - steady_exit_swap >= RESTART_AFTER_SWAPS;
+        } else if (steady_cadence < 1.4f || steady_short_run >= 3) {
+            steady_active = false;
+            steady_exit_swap = fg_swaps;
+        }
+        if (steady_active != was_active && GetQualityOptions().steady_thirty) {
+            LOG_INFO(Render, "Steady 30 FPS: {}", steady_active
+                                                      ? "the game draws at 30 FPS, each of its "
+                                                        "frames is shown for two refreshes"
+                                                      : "the game draws faster than 30 FPS again");
+        }
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - rhythm_start < std::chrono::seconds{1}) {
@@ -2661,14 +2755,34 @@ void RendererMetal::NoteFrameRhythm() {
     if (kinds < 2 || std::abs(Settings::GetFrameLimit() - 100.0) > 1.0) {
         return;
     }
-    const int cap = GetQualityOptions().frame_cap;
+    const int hold = FrameHold();
     LOG_INFO(Render,
              "Game frame rhythm: {} frames lasted 1 refresh of the 3DS, {} lasted 2, {} lasted "
              "3, {} lasted 4 or more{}",
              counts[0], counts[1], counts[2], counts[3],
-             cap > 0 && GetQualityOptions().display_sync
-                 ? fmt::format(" (frame cap on: each is shown for {})", cap)
-                 : std::string{});
+             hold > 0 ? fmt::format(" ({}: each is shown for {})",
+                                    GetQualityOptions().frame_cap > 0 ? "frame cap on"
+                                                                      : "Steady 30 FPS",
+                                    hold)
+                      : std::string{});
+}
+
+int RendererMetal::FrameHold() const {
+    const QualityOptions& options = GetQualityOptions();
+    if (!options.display_sync) {
+        return 0;
+    }
+    if (options.frame_cap > 0) {
+        return options.frame_cap;
+    }
+    // Not with frame generation (it has its own handling of 30 FPS games), and not while fast
+    // forwarding or slowed down, where the frames do not come at the game's pace.
+    const double limit = Settings::GetFrameLimit();
+    if (options.steady_thirty && steady_active && options.frame_generation == 0 && limit > 0.0 &&
+        limit <= 110.0) {
+        return 2;
+    }
+    return 0;
 }
 
 bool RendererMetal::RenderDisplaySynced(CAMetalLayer* target,
@@ -2694,7 +2808,28 @@ bool RendererMetal::RenderDisplaySynced(CAMetalLayer* target,
         ds_width = layout.width;
         ds_height = layout.height;
     }
-    ds_index = (ds_index + 1) % DS_COLORS;
+    // The next picture the display link is not using: not the one on screen, which it presents
+    // again at every refresh without a new frame (Present Every Refresh), and none that is waiting.
+    // Picking the next one in turn drew over the picture on screen when the frames came faster
+    // than the display took them, which then showed half-drawn. Frames waiting beyond what the
+    // display link keeps are let go first, it would drop them anyway.
+    {
+        std::scoped_lock lock{fg_pacer->mutex};
+        while (fg_pacer->waiting.size() > 1 + fg_pacer->min_waiting) {
+            fg_pacer->waiting.pop_front();
+        }
+        for (u32 tries = 0; tries < DS_COLORS; ++tries) {
+            ds_index = (ds_index + 1) % DS_COLORS;
+            const id<MTLTexture> candidate = ds_color[ds_index];
+            bool in_use = candidate == fg_pacer->on_screen.texture;
+            for (const DisplayPacer::Frame& frame : fg_pacer->waiting) {
+                in_use = in_use || frame.texture == candidate;
+            }
+            if (!in_use) {
+                break;
+            }
+        }
+    }
     id<MTLTexture> current = ds_color[ds_index];
 
     // How long this frame of the game lasts: as many of the game's refreshes as swaps went by.
@@ -2702,8 +2837,8 @@ bool RendererMetal::RenderDisplaySynced(CAMetalLayer* target,
     // unevenness of the game's own timing.
     const u32 swaps = std::clamp(fg_swaps - plain_last_swaps, 1u, 4u);
     plain_last_swaps = fg_swaps;
-    const int cap = GetQualityOptions().frame_cap;
-    const u32 held = cap > 0 ? static_cast<u32>(cap) : swaps;
+    const int hold = FrameHold();
+    const u32 held = hold > 0 ? static_cast<u32>(hold) : swaps;
 
     scheduler.Flush();
     scheduler.MarkPresentation();
@@ -2726,7 +2861,8 @@ bool RendererMetal::RenderDisplaySynced(CAMetalLayer* target,
 #endif
     // The display link draws it on a queue of its own once this event says it is finished.
     if (ds_event == nil) {
-        ds_event = [device newEvent];
+        // Shared: the display link reads how far it got (signaledValue).
+        ds_event = [device newSharedEvent];
     }
     ds_event_value++;
     [scheduler.CommandBuffer() encodeSignalEvent:ds_event value:ds_event_value];
@@ -2778,7 +2914,7 @@ bool RendererMetal::RenderPacedPlain(const Layout::FramebufferLayout& layout) {
 #endif
     // The display link draws it on a queue of its own once this event says it is finished.
     if (ds_event == nil) {
-        ds_event = [instance.GetDevice() newEvent];
+        ds_event = [instance.GetDevice() newSharedEvent];
     }
     ds_event_value++;
     [scheduler.CommandBuffer() encodeSignalEvent:ds_event value:ds_event_value];
@@ -2807,6 +2943,11 @@ bool RendererMetal::StartPacer(CAMetalLayer* layer) {
             GetQualityOptions().frame_generation > 0 && GetQualityOptions().frame_generation_buffer
                 ? 2u
                 : 1u;
+        // Not with frame generation: it already presents a frame every second refresh, and the
+        // copies took GPU time from making frames, which turned frame generation off (Adaptive,
+        // Pause When Behind) in a game that was close to its budget.
+        pacer->repeat_frames =
+            GetQualityOptions().present_every_refresh && GetQualityOptions().frame_generation == 0;
         id<MTLRenderPipelineState> pipeline = present_pipeline;
         id<MTLSamplerState> sampler = present_samplers[0];
         pacer->draw = [pipeline, sampler](id<MTLRenderCommandEncoder> encoder,
@@ -3013,11 +3154,10 @@ void RendererMetal::SwapBuffers() {
         held_frames = 0;
     }
 
-    // The frame cap shows new frames of the game only (a repeated one would take a slot).
-    const bool skip_duplicates =
-        Settings::values.use_skip_duplicate_frames.GetValue() ||
-        (GetQualityOptions().frame_cap > 0 && GetQualityOptions().display_sync &&
-         GetQualityOptions().frame_generation == 0);
+    // The frame cap and Steady 30 FPS show new frames of the game only (a repeated one would take
+    // a slot).
+    const bool skip_duplicates = Settings::values.use_skip_duplicate_frames.GetValue() ||
+                                 (FrameHold() > 0 && GetQualityOptions().frame_generation == 0);
     if (!hold_frame && (!skip_duplicates || Core::PerfStats::game_frames_updated)) {
         if (layer_dirty) {
             AcquireLayer();
