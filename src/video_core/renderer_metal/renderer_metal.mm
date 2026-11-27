@@ -663,6 +663,9 @@ private:
     id<MTLComputePipelineState> fx_flow_coarse = nil;
     id<MTLComputePipelineState> fx_flow_refine = nil;
     id<MTLComputePipelineState> fx_flow_expand = nil;
+    id<MTLComputePipelineState> fx_flow_median = nil;
+    id<MTLTexture> fx_flow_coarse_filtered = nil;
+    id<MTLTexture> fx_flow_blocks_filtered = nil;
     std::array<id<MTLTexture>, 2> fx_luma{};
     id<MTLTexture> fx_flow_coarse_tex = nil;
     id<MTLTexture> fx_flow_blocks = nil;
@@ -1962,6 +1965,36 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
     blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
 }
 
+/// Vector median of the 3x3 neighbourhood: the one vector of the nine that is closest to all of
+/// the others. A repeating texture (stairs, bricks, fences) matches at several offsets, and the
+/// block that picks the wrong one is an outlier among its neighbours that this removes.
+kernel void flow_median(texture2d<float, access::read> src [[texture(0)]],
+                        texture2d<float, access::write> dst [[texture(1)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) {
+        return;
+    }
+    const int2 last = int2(src.get_width() - 1, src.get_height() - 1);
+    float2 v[9];
+    for (int i = 0; i < 9; ++i) {
+        v[i] = src.read(uint2(clamp(int2(gid) + int2(i % 3 - 1, i / 3 - 1), int2(0), last))).xy;
+    }
+    float best = 1e9;
+    float2 pick = v[4];
+    for (int i = 0; i < 9; ++i) {
+        float sum = 0.0;
+        for (int j = 0; j < 9; ++j) {
+            sum += abs(v[i].x - v[j].x) + abs(v[i].y - v[j].y);
+        }
+        // The block's own vector wins a tie.
+        if (sum < best - 0.001 || (i == 4 && sum < best + 0.001)) {
+            best = sum;
+            pick = v[i];
+        }
+    }
+    dst.write(float4(pick, 0.0, 0.0), gid);
+}
+
 kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
                         texture2d<float, access::write> motion [[texture(1)]],
                         constant uint& zero [[buffer(0)]],
@@ -2177,6 +2210,8 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_luma = {};
     fx_flow_coarse_tex = nil;
     fx_flow_blocks = nil;
+    fx_flow_coarse_filtered = nil;
+    fx_flow_blocks_filtered = nil;
     fx_small_color = {};
     fx_small_out = nil;
     fx_full_out = nil;
@@ -2366,8 +2401,9 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_coarse = make(@"flow_coarse");
         fx_flow_refine = make(@"flow_refine");
         fx_flow_expand = make(@"flow_expand");
+        fx_flow_median = make(@"flow_median");
         if (fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
-            fx_flow_expand == nil) {
+            fx_flow_expand == nil || fx_flow_median == nil) {
             LOG_ERROR(Render, "Optical flow shaders failed: {}; MetalFX gets no motion vectors",
                       error ? error.localizedDescription.UTF8String : "unknown error");
             fx_flow_expand = nil;
@@ -2398,8 +2434,11 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_luma[1] = make_texture(MTLPixelFormatR16Float, luma_width, luma_height);
         fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
+        fx_flow_coarse_filtered = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
+        fx_flow_blocks_filtered = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
         if (fx_luma[0] == nil || fx_luma[1] == nil || fx_flow_coarse_tex == nil ||
-            fx_flow_blocks == nil) {
+            fx_flow_blocks == nil || fx_flow_coarse_filtered == nil ||
+            fx_flow_blocks_filtered == nil) {
             LOG_ERROR(Render, "Optical flow textures could not be made");
             fx_flow_failed = true;
             return;
@@ -2429,16 +2468,27 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:fx_flow_coarse_tex atIndex:2];
         grid(encoder, coarse_width, coarse_height);
 
+        // The coarse vectors, cleaned of outliers, steer the refinement.
+        [encoder setComputePipelineState:fx_flow_median];
+        [encoder setTexture:fx_flow_coarse_tex atIndex:0];
+        [encoder setTexture:fx_flow_coarse_filtered atIndex:1];
+        grid(encoder, coarse_width, coarse_height);
+
         [encoder setComputePipelineState:fx_flow_refine];
         [encoder setTexture:color atIndex:0];
         [encoder setTexture:previous atIndex:1];
-        [encoder setTexture:fx_flow_coarse_tex atIndex:2];
+        [encoder setTexture:fx_flow_coarse_filtered atIndex:2];
         [encoder setTexture:fx_flow_blocks atIndex:3];
+        grid(encoder, block_width, block_height);
+
+        [encoder setComputePipelineState:fx_flow_median];
+        [encoder setTexture:fx_flow_blocks atIndex:0];
+        [encoder setTexture:fx_flow_blocks_filtered atIndex:1];
         grid(encoder, block_width, block_height);
     }
     const u32 zero_flag = zero ? 1u : 0u;
     [encoder setComputePipelineState:fx_flow_expand];
-    [encoder setTexture:fx_flow_blocks atIndex:0];
+    [encoder setTexture:fx_flow_blocks_filtered atIndex:0];
     [encoder setTexture:fx_motion atIndex:1];
     [encoder setBytes:&zero_flag length:sizeof(zero_flag) atIndex:0];
     grid(encoder, width, height);
