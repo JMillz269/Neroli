@@ -289,7 +289,19 @@ struct SaveStateManagerView: View {
                 let list = states(of: programID)
                 Section {
                     ForEach(list, id: \.self) { entry in
-                        row(entry)
+                        row(entry, title: title(of: programID))
+                            .contextMenu {
+                                Button {
+                                    SaveStateFiles.export(programID: entry.programID,
+                                                          movieID: entry.movieID, slot: entry.slot,
+                                                          title: title(of: entry.programID))
+                                } label: {
+                                    Label("Export State", systemImage: "square.and.arrow.up")
+                                }
+                                Button(role: .destructive) { pendingDelete = entry } label: {
+                                    Label("Delete State", systemImage: "trash")
+                                }
+                            }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) { pendingDelete = entry } label: {
                                     Label("Delete", systemImage: "trash")
@@ -319,8 +331,8 @@ struct SaveStateManagerView: View {
                 Section {
                     LabeledContent("All Save States", value: sizeText(total(of: entries)))
                 } footer: {
-                    Text("Swipe a state left to delete it, right to export it as a file. Deleting "
-                         + "cannot be undone. Import (the menu at the top) adds a state file to "
+                    Text("The arrow next to a state (or press and hold it) exports it as a file; "
+                         + "swipe left to delete it. Deleting cannot be undone. Import (the menu at the top) adds a state file to "
                          + "the first free slot of its game. States made by another version of "
                          + "the app are marked: they cannot be loaded.")
                 }
@@ -384,7 +396,7 @@ struct SaveStateManagerView: View {
         }
     }
 
-    private func row(_ entry: AZSaveStateEntry) -> some View {
+    private func row(_ entry: AZSaveStateEntry, title: String) -> some View {
         HStack {
             Group {
                 if let path = entry.thumbnailPath, let image = UIImage(contentsOfFile: path) {
@@ -411,6 +423,16 @@ struct SaveStateManagerView: View {
             Text(sizeText(UInt64(entry.fileSize)))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Button {
+                SaveStateFiles.export(programID: entry.programID, movieID: entry.movieID,
+                                      slot: entry.slot, title: title)
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .imageScale(.medium)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Export State")
         }
     }
 
