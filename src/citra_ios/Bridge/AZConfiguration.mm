@@ -67,6 +67,7 @@
     config.frameGenerationBuffer = NO;
     config.frameGenerationDisplayPaced = NO;
     config.frameGenerationMetalFX = NO;
+    config.frameGenerationFlow = NO;
     config.displayRefreshRate = 60;
     config.shaderWaitMs = 2;
     config.stereoMode = 0;

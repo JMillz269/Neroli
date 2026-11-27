@@ -658,6 +658,16 @@ private:
     std::array<id<MTLTexture>, 2> fx_scaled{};
     id<MTLTexture> fx_depth = nil;
     id<MTLTexture> fx_motion = nil;
+    // Optical flow for the motion texture (QualityOptions::frame_generation_flow).
+    id<MTLComputePipelineState> fx_flow_down = nil;
+    id<MTLComputePipelineState> fx_flow_coarse = nil;
+    id<MTLComputePipelineState> fx_flow_refine = nil;
+    id<MTLComputePipelineState> fx_flow_expand = nil;
+    std::array<id<MTLTexture>, 2> fx_luma{};
+    id<MTLTexture> fx_flow_coarse_tex = nil;
+    id<MTLTexture> fx_flow_blocks = nil;
+    bool fx_flow_failed{false};
+    u32 fx_flow_frames{};
     /// The interpolation runs on a queue of its own, after the real picture (an event), so the
     /// next frames of the game do not wait behind it on the GPU.
     id<MTLCommandQueue> fx_queue = nil;
@@ -678,6 +688,9 @@ private:
     u32 fx_scaled_index{};
     bool PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area_width, f32 area_height,
                         f32 scale);
+    /// Motion vectors from the previous to the current real frame into fx_motion, on `buffer`.
+    void EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTexture> color,
+                             id<MTLTexture> previous, bool zero);
     bool EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> color, id<MTLTexture> previous,
                        id<MTLTexture> output, double delta_time);
     /// Display-driven pacing: a CAMetalDisplayLink on a thread of its own shows the frames.
@@ -1844,6 +1857,119 @@ bool RendererMetal::UseFrameGeneration(const Layout::FramebufferLayout& layout) 
 namespace {
 /// Converts the picture of a frame into the 4:2:0 YCbCr planes the interpolation takes (BT.709,
 /// video range), and draws such planes back onto the screen.
+/// Optical flow for MetalFX frame interpolation: block matching between the previous and the
+/// current real frame, coarse to fine, written as motion vectors in pixels that point from a pixel
+/// of the current frame to where its content was in the previous one (MetalFX's motion texture).
+/// 1. flow_down: both frames to quarter-size luma.
+/// 2. flow_coarse: one vector per 4x4 luma block (16x16 pixels), search +-8 luma pixels (+-32).
+/// 3. flow_refine: one vector per 8x8 pixel block, +-2 around the coarse vector.
+/// 4. flow_expand: the vectors of the blocks, interpolated, per pixel.
+/// A penalty on the length of a vector keeps flat areas, where every vector matches equally, still.
+constexpr const char* kOpticalFlowShaders = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+constant float3 kLuma = float3(0.299, 0.587, 0.114);
+
+kernel void flow_down(texture2d<float, access::read> src [[texture(0)]],
+                      texture2d<float, access::write> dst [[texture(1)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) {
+        return;
+    }
+    const uint2 last = uint2(src.get_width() - 1, src.get_height() - 1);
+    float sum = 0.0;
+    for (uint y = 0; y < 4; ++y) {
+        for (uint x = 0; x < 4; ++x) {
+            sum += dot(src.read(min(gid * 4 + uint2(x, y), last)).rgb, kLuma);
+        }
+    }
+    dst.write(float4(sum / 16.0), gid);
+}
+
+kernel void flow_coarse(texture2d<float, access::read> cur [[texture(0)]],
+                        texture2d<float, access::read> prev [[texture(1)]],
+                        texture2d<float, access::write> out [[texture(2)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
+        return;
+    }
+    const int2 size = int2(cur.get_width(), cur.get_height());
+    const int2 origin = int2(gid) * 4;
+    float block[16];
+    for (int i = 0; i < 16; ++i) {
+        block[i] = cur.read(uint2(min(origin + int2(i & 3, i >> 2), size - 1))).x;
+    }
+    float best = 1e9;
+    int2 best_vector = int2(0);
+    for (int dy = -8; dy <= 8; ++dy) {
+        for (int dx = -8; dx <= 8; ++dx) {
+            float sad = 0.01 * float(abs(dx) + abs(dy));
+            for (int i = 0; i < 16; ++i) {
+                const int2 q = clamp(origin + int2(i & 3, i >> 2) + int2(dx, dy), int2(0), size - 1);
+                sad += abs(block[i] - prev.read(uint2(q)).x);
+            }
+            if (sad < best) {
+                best = sad;
+                best_vector = int2(dx, dy);
+            }
+        }
+    }
+    out.write(float4(float2(best_vector * 4), 0.0, 0.0), gid);
+}
+
+kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
+                        texture2d<float, access::read> prev [[texture(1)]],
+                        texture2d<float, access::read> coarse [[texture(2)]],
+                        texture2d<float, access::write> blocks [[texture(3)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= blocks.get_width() || gid.y >= blocks.get_height()) {
+        return;
+    }
+    const int2 size = int2(cur.get_width(), cur.get_height());
+    const int2 origin = int2(gid) * 8;
+    const uint2 coarse_id = min(gid / 2, uint2(coarse.get_width() - 1, coarse.get_height() - 1));
+    const int2 center = int2(round(coarse.read(coarse_id).xy));
+    float block[64];
+    for (int i = 0; i < 64; ++i) {
+        block[i] = dot(cur.read(uint2(min(origin + int2(i & 7, i >> 3), size - 1))).rgb, kLuma);
+    }
+    float best = 1e9;
+    int2 best_vector = int2(0);
+    // Around the coarse vector, and no motion at all.
+    for (int k = -1; k < 25; ++k) {
+        const int2 v = k < 0 ? int2(0) : center + int2(k % 5 - 2, k / 5 - 2);
+        float sad = 0.02 * float(abs(v.x) + abs(v.y));
+        for (int i = 0; i < 64; ++i) {
+            const int2 q = clamp(origin + int2(i & 7, i >> 3) + v, int2(0), size - 1);
+            sad += abs(block[i] - dot(prev.read(uint2(q)).rgb, kLuma));
+        }
+        if (sad < best) {
+            best = sad;
+            best_vector = v;
+        }
+    }
+    blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
+}
+
+kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
+                        texture2d<float, access::write> motion [[texture(1)]],
+                        constant uint& zero [[buffer(0)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= motion.get_width() || gid.y >= motion.get_height()) {
+        return;
+    }
+    float2 flow = float2(0.0);
+    if (zero == 0) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+        const float2 size = float2(blocks.get_width(), blocks.get_height());
+        // Block centers are at (index + 0.5) * 8 pixels.
+        flow = blocks.sample(s, (float2(gid) + 0.5) / (size * 8.0)).xy;
+    }
+    motion.write(float4(flow, 0.0, 0.0), gid);
+}
+)";
+
 constexpr const char* kFrameGenerationShaders = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -2038,6 +2164,9 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_scaled = {};
     fx_depth = nil;
     fx_motion = nil;
+    fx_luma = {};
+    fx_flow_coarse_tex = nil;
+    fx_flow_blocks = nil;
     fx_small_color = {};
     fx_small_out = nil;
     fx_full_out = nil;
@@ -2079,7 +2208,8 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
                                                            width:width
                                                           height:height
                                                        mipmapped:NO];
-    motion_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    motion_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                        MTLTextureUsageShaderWrite;
     motion_desc.storageMode = MTLStorageModePrivate;
     fx_depth = [device newTextureWithDescriptor:depth_desc];
     fx_motion = [device newTextureWithDescriptor:motion_desc];
@@ -2207,6 +2337,104 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     return true;
 }
 
+void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTexture> color,
+                                        id<MTLTexture> previous, bool zero) {
+    id<MTLDevice> device = instance.GetDevice();
+    if (fx_flow_expand == nil) {
+        NSError* error = nil;
+        id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:kOpticalFlowShaders]
+                                                      options:nil
+                                                        error:&error];
+        const auto make = [&](NSString* name) -> id<MTLComputePipelineState> {
+            if (library == nil) {
+                return nil;
+            }
+            return [device newComputePipelineStateWithFunction:[library newFunctionWithName:name]
+                                                         error:&error];
+        };
+        fx_flow_down = make(@"flow_down");
+        fx_flow_coarse = make(@"flow_coarse");
+        fx_flow_refine = make(@"flow_refine");
+        fx_flow_expand = make(@"flow_expand");
+        if (fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
+            fx_flow_expand == nil) {
+            LOG_ERROR(Render, "Optical flow shaders failed: {}; MetalFX gets no motion vectors",
+                      error ? error.localizedDescription.UTF8String : "unknown error");
+            fx_flow_expand = nil;
+            fx_flow_failed = true;
+            return;
+        }
+    }
+    const u32 width = static_cast<u32>(fx_motion.width);
+    const u32 height = static_cast<u32>(fx_motion.height);
+    const u32 luma_width = (width + 3) / 4;
+    const u32 luma_height = (height + 3) / 4;
+    const u32 coarse_width = (luma_width + 3) / 4;
+    const u32 coarse_height = (luma_height + 3) / 4;
+    const u32 block_width = (width + 7) / 8;
+    const u32 block_height = (height + 7) / 8;
+    if (fx_flow_blocks == nil) {
+        const auto make_texture = [&](MTLPixelFormat format, u32 w, u32 h) {
+            MTLTextureDescriptor* desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                   width:w
+                                                                  height:h
+                                                               mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            desc.storageMode = MTLStorageModePrivate;
+            return [device newTextureWithDescriptor:desc];
+        };
+        fx_luma[0] = make_texture(MTLPixelFormatR16Float, luma_width, luma_height);
+        fx_luma[1] = make_texture(MTLPixelFormatR16Float, luma_width, luma_height);
+        fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
+        fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
+        if (fx_luma[0] == nil || fx_luma[1] == nil || fx_flow_coarse_tex == nil ||
+            fx_flow_blocks == nil) {
+            LOG_ERROR(Render, "Optical flow textures could not be made");
+            fx_flow_failed = true;
+            return;
+        }
+        LOG_INFO(Render, "MetalFX frame interpolation gets motion vectors from an optical flow "
+                         "pass ({}x{}, one vector per 8x8 pixels)",
+                 width, height);
+    }
+
+    const auto grid = [](id<MTLComputeCommandEncoder> encoder, u32 w, u32 h) {
+        [encoder dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+    };
+    id<MTLComputeCommandEncoder> encoder = [buffer computeCommandEncoder];
+    encoder.label = @"optical flow";
+    if (!zero) {
+        [encoder setComputePipelineState:fx_flow_down];
+        [encoder setTexture:color atIndex:0];
+        [encoder setTexture:fx_luma[0] atIndex:1];
+        grid(encoder, luma_width, luma_height);
+        [encoder setTexture:previous atIndex:0];
+        [encoder setTexture:fx_luma[1] atIndex:1];
+        grid(encoder, luma_width, luma_height);
+
+        [encoder setComputePipelineState:fx_flow_coarse];
+        [encoder setTexture:fx_luma[0] atIndex:0];
+        [encoder setTexture:fx_luma[1] atIndex:1];
+        [encoder setTexture:fx_flow_coarse_tex atIndex:2];
+        grid(encoder, coarse_width, coarse_height);
+
+        [encoder setComputePipelineState:fx_flow_refine];
+        [encoder setTexture:color atIndex:0];
+        [encoder setTexture:previous atIndex:1];
+        [encoder setTexture:fx_flow_coarse_tex atIndex:2];
+        [encoder setTexture:fx_flow_blocks atIndex:3];
+        grid(encoder, block_width, block_height);
+    }
+    const u32 zero_flag = zero ? 1u : 0u;
+    [encoder setComputePipelineState:fx_flow_expand];
+    [encoder setTexture:fx_flow_blocks atIndex:0];
+    [encoder setTexture:fx_motion atIndex:1];
+    [encoder setBytes:&zero_flag length:sizeof(zero_flag) atIndex:0];
+    grid(encoder, width, height);
+    [encoder endEncoding];
+}
+
 bool RendererMetal::EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> color,
                                   id<MTLTexture> previous, id<MTLTexture> output,
                                   double delta_time) {
@@ -2216,6 +2444,11 @@ bool RendererMetal::EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> co
     SEL encode = NSSelectorFromString(@"encodeToCommandBuffer:");
     id<MTLTexture> frame_color = color;
     id<MTLTexture> frame_previous = previous;
+
+    if (GetQualityOptions().frame_generation_flow && !fx_flow_failed) {
+        // Real motion for the interpolator (and the scaler) instead of the cleared texture.
+        EncodeMotionVectors(buffer, color, previous, fx_reset);
+    }
 
     if (fx_scaler != nil) {
         // The scaler runs on every real frame; the interpolator takes its results.

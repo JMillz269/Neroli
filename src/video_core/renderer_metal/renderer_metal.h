@@ -207,6 +207,9 @@ struct QualityOptions {
     bool present_every_refresh = false;
     /// Frame generation with MetalFX's own frame interpolator instead of VideoToolbox's.
     bool frame_generation_metalfx = false;
+    /// MetalFX interpolation gets motion vectors from an optical flow pass over the two real
+    /// frames instead of a texture of zeros.
+    bool frame_generation_flow = false;
     /// Frames of frame generation are shown by a display link at the display's refreshes.
     bool frame_generation_display_paced = false;
     /// Highest refresh rate of the display, frame generation for 60 FPS games needs 100 or more.

@@ -85,6 +85,8 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL frameGenerationDisplayPaced;
 /// Frame generation with MetalFX's frame interpolator instead of VideoToolbox's.
 @property(nonatomic) BOOL frameGenerationMetalFX;
+/// With MetalFX interpolation: motion vectors from an optical flow pass over the two real frames.
+@property(nonatomic) BOOL frameGenerationFlow;
 /// Highest refresh rate of the display (UIScreen.maximumFramesPerSecond).
 @property(nonatomic) NSInteger displayRefreshRate;
 /// Milliseconds a draw waits for its shader to build before it is skipped (0 never waits).

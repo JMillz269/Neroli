@@ -763,6 +763,7 @@ struct GraphicsSettingsView: View {
             HelpItem("Pause When Behind", "Shows the game's own frames, at a steady rate, only while made frames are actually being lost (several a second) and no smaller size helps, and tries frame generation again after 5 seconds."),
             HelpItem("Frame Buffer", "Keeps one more frame waiting before showing them, so a frame that comes a little late still makes its refresh: steadier (most noticeable at 120 Hz) for one refresh more input latency."),
             HelpItem("Use MetalFX Interpolation (Experimental)", "Makes the in-between frames with MetalFX's frame interpolator instead of VideoToolbox's."),
+            HelpItem("MetalFX: Optical Flow Motion (Experimental)", "MetalFX needs to know how things move between the two real frames. Without this, it gets no motion information and guesses from the colors alone, which can smear text and ghost fast objects. With it, Neroli measures the motion itself by comparing the two frames (about 1–2 ms of GPU time per frame) and hands it to MetalFX. Only with MetalFX interpolation; if the result looks worse in a game, turn it off for that game."),
             HelpItem("Top Screen Only", "Leaves the bottom screen at the game's own frame rate, which halves the work in most layouts."),
             HelpItem("Display-Driven Pacing", "Lets the display pick up each frame at its own refresh instead of timing the frames in advance (iOS 17 or later)."),
             HelpItem("Also 60 FPS Games (120 Hz)", "Makes 60 FPS games show 120 frames per second; needs Display-Driven Pacing and the display at 120 Hz, adds about 8 ms of delay and twice the heat."),
@@ -793,6 +794,9 @@ struct GraphicsSettingsView: View {
                 Toggle("Use MetalFX Interpolation (Experimental)",
                        isOn: $settings.frameGenerationMetalFX)
                     .disabled(settings.frameGeneration == 0)
+                Toggle("MetalFX: Optical Flow Motion (Experimental)",
+                       isOn: $settings.frameGenerationFlow)
+                    .disabled(settings.frameGeneration == 0 || !settings.frameGenerationMetalFX)
                 Toggle("Top Screen Only", isOn: $settings.frameGenerationTopOnly)
                     .disabled(settings.frameGeneration == 0)
                 Toggle("Display-Driven Pacing", isOn: $settings.frameGenerationDisplayPaced)
