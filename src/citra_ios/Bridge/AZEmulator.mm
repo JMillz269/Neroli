@@ -178,28 +178,75 @@ std::string PreloadGame(const std::string& filepath, bool keep_compressed,
     }
 
     const auto start = std::chrono::steady_clock::now();
-    for (u64 offset = 0; offset < image->size; offset += CHUNK) {
-        if (stop.load(std::memory_order_relaxed)) {
-            return {};
+    // A compressed game is decompressed on several threads (Grand Central Dispatch): its frames are
+    // independent, but a reader keeps one decompression state, so each thread gets a copy of the
+    // file of its own. Anything else is a plain read, which one thread does at storage speed.
+    u32 workers = 1;
+    std::vector<std::unique_ptr<FileUtil::IOFileBase>> readers;
+    readers.push_back(std::move(source));
+    if (image->kind == FileUtil::Preload::Image::Kind::Decompressed) {
+        // The performance cores; the rest would be efficiency cores, and the main threads of the
+        // app are busy with the UI while it boots.
+        workers = static_cast<u32>(std::clamp<NSUInteger>(
+            NSProcessInfo.processInfo.activeProcessorCount / 2, 1, 4));
+        while (readers.size() < workers) {
+            auto copy = readers.front()->OpenCopy();
+            if (copy == nullptr || !copy->IsGood()) {
+                break;
+            }
+            readers.push_back(std::move(copy));
         }
-        const u64 count = std::min(CHUNK, image->size - offset);
-        if (source->ReadAtBytes(image->data.get() + offset, count, offset) != count) {
-            LOG_WARNING(Frontend, "Preload: reading {} failed at {} MiB, it is read from storage "
-                                  "as usual",
-                        filepath, offset >> 20);
-            return not_preloaded;
+        workers = static_cast<u32>(readers.size());
+    }
+    std::atomic<u64> next_offset{0};
+    std::atomic<u64> done_bytes{0};
+    std::atomic<bool> failed{false};
+    std::atomic<u64> failed_at{0};
+    const u64 total = image->size;
+    u8* const destination = image->data.get();
+    const auto work = [&](std::size_t index) {
+        FileUtil::IOFileBase* const reader = readers[index].get();
+        while (!failed.load(std::memory_order_relaxed) && !stop.load(std::memory_order_relaxed)) {
+            const u64 offset = next_offset.fetch_add(CHUNK, std::memory_order_relaxed);
+            if (offset >= total) {
+                return;
+            }
+            const u64 count = std::min(CHUNK, total - offset);
+            if (reader->ReadAtBytes(destination + offset, count, offset) != count) {
+                failed_at.store(offset, std::memory_order_relaxed);
+                failed.store(true, std::memory_order_relaxed);
+                return;
+            }
+            const u64 done = done_bytes.fetch_add(count, std::memory_order_relaxed) + count;
+            progress = static_cast<double>(done) / static_cast<double>(total);
         }
-        progress = static_cast<double>(offset + count) / static_cast<double>(image->size);
+    };
+    if (workers > 1) {
+        dispatch_apply(workers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                       ^(size_t index) {
+                         work(index);
+                       });
+    } else {
+        work(0);
+    }
+    if (stop.load(std::memory_order_relaxed)) {
+        return {};
+    }
+    if (failed.load()) {
+        LOG_WARNING(Frontend, "Preload: reading {} failed at {} MiB, it is read from storage as "
+                              "usual",
+                    filepath, failed_at.load() >> 20);
+        return not_preloaded;
     }
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    LOG_INFO(Frontend, "Preload: {} MiB of game in memory{} in {:.1f} s ({} MiB of memory left)",
+    LOG_INFO(Frontend, "Preload: {} MiB of game in memory{} in {:.1f} s on {} thread(s) ({} MiB of memory left)",
              image->size >> 20,
              image->kind == FileUtil::Preload::Image::Kind::Decompressed
                  ? fmt::format(", decompressed from {} MiB", stored_size >> 20)
                  : (is_compressed ? std::string{" (kept compressed, decompressed as it is read)"}
                                   : std::string{}),
-             seconds, os_proc_available_memory() >> 20);
+             seconds, workers, os_proc_available_memory() >> 20);
     FileUtil::Preload::Add(std::move(image));
     return {};
 }
