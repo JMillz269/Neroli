@@ -38,6 +38,19 @@ final class DocumentImporter: NSObject, UIDocumentPickerDelegate {
         return true
     }
 
+    /// Shows the system share sheet (AirDrop, Save to Files, ...) for files.
+    static func share(_ urls: [URL]) {
+        guard let presenter = topViewController() else { return }
+        let sheet = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = presenter.view
+            popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY,
+                                        width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        presenter.present(sheet, animated: true)
+    }
+
     private static func topViewController() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first

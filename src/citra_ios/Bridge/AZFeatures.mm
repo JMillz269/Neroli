@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -88,6 +89,35 @@
 
 - (BOOL)isLoadable {
     return _loadable;
+}
+
+@end
+
+@implementation AZSaveStateImport {
+    NSInteger _slot;
+    uint64_t _programID;
+    NSString* _message;
+}
+
+- (instancetype)initWithSlot:(NSInteger)slot programID:(uint64_t)programID message:(NSString*)message {
+    if ((self = [super init])) {
+        _slot = slot;
+        _programID = programID;
+        _message = message;
+    }
+    return self;
+}
+
+- (NSInteger)slot {
+    return _slot;
+}
+
+- (uint64_t)programID {
+    return _programID;
+}
+
+- (NSString*)message {
+    return _message;
 }
 
 @end
@@ -711,6 +741,60 @@ void SaveStateThumbnail(const std::string& path) {
         FileUtil::Delete(thumbnail);
     }
     return removed;
+}
+
++ (NSString*)saveStatePathForProgram:(uint64_t)programID movie:(uint64_t)movieID slot:(NSInteger)slot {
+    if (slot < 0 || slot > Core::SaveStateSlotCount) {
+        return nil;
+    }
+    const std::string path = StatePath(programID, movieID, static_cast<u32>(slot));
+    return FileUtil::Exists(path) ? ToNSString(path) : nil;
+}
+
++ (AZSaveStateImport*)importSaveStateAtPath:(NSString*)path {
+    const auto fail = [](NSString* message) {
+        return [[AZSaveStateImport alloc] initWithSlot:-1 programID:0 message:message];
+    };
+    // The start of a state: "CST" 0x1B, then the title ID.
+    u8 header[12]{};
+    {
+        FileUtil::IOFile file(std::string{path.UTF8String}, "rb");
+        if (!file.IsOpen() || file.ReadBytes(header, sizeof(header)) != sizeof(header) ||
+            std::memcmp(header, "CST\x1B", 4) != 0) {
+            return fail(@"That file is not a save state.");
+        }
+    }
+    u64 program_id = 0;
+    std::memcpy(&program_id, header + 4, sizeof(program_id)); // little endian, like the device
+    u32 slot = 0;
+    for (u32 candidate = 1; candidate <= 10; ++candidate) {
+        if (!FileUtil::Exists(StatePath(program_id, 0, candidate))) {
+            slot = candidate;
+            break;
+        }
+    }
+    if (slot == 0) {
+        return fail(@"All numbered slots of that game already hold a state. Delete one first.");
+    }
+    const std::string target = StatePath(program_id, 0, slot);
+    if (!FileUtil::Copy(std::string{path.UTF8String}, target)) {
+        return fail(@"The state could not be copied.");
+    }
+    // The core's own check of the header (the game and the version that made it).
+    const Core::SaveStateInfo info = Core::GetSaveStateInfo(program_id, 0, slot);
+    if (info.slot == std::numeric_limits<u32>::max() ||
+        info.status == Core::SaveStateInfo::ValidationStatus::BuildMismatch) {
+        FileUtil::Delete(target);
+        return fail(info.slot == std::numeric_limits<u32>::max()
+                        ? @"That file is not a valid save state."
+                        : @"That state was made by another version of the app and cannot be "
+                          @"loaded.");
+    }
+    const std::string thumbnail = StateThumbnailPath(program_id, 0, slot);
+    if (FileUtil::Exists(thumbnail)) {
+        FileUtil::Delete(thumbnail);
+    }
+    return [[AZSaveStateImport alloc] initWithSlot:slot programID:program_id message:nil];
 }
 
 // MARK: Cheats

@@ -101,6 +101,16 @@ extern NSErrorDomain const AZEmulatorErrorDomain;
 @property(nonatomic, readonly, nullable) NSString* thumbnailPath;
 @end
 
+/// The result of importing a save state file.
+@interface AZSaveStateImport : NSObject
+/// The slot the state went into (the first free numbered slot of its game), -1 when it could not
+/// be imported.
+@property(nonatomic, readonly) NSInteger slot;
+@property(nonatomic, readonly) uint64_t programID;
+/// Why it could not be imported.
+@property(nonatomic, readonly, nullable) NSString* message;
+@end
+
 /// A cheat of the running title.
 @interface AZCheat : NSObject
 @property(nonatomic, copy) NSString* name;
@@ -329,6 +339,15 @@ typedef NS_ENUM(NSInteger, AZCompressStatus) {
 + (NSArray<AZSaveStateEntry*>*)allSaveStates;
 /// Deletes one state and its picture. A state of the running game may be deleted too.
 + (BOOL)deleteSaveStateForProgram:(uint64_t)programID movie:(uint64_t)movieID slot:(NSInteger)slot;
+/// The file of a state, nil when there is none.
++ (nullable NSString*)saveStatePathForProgram:(uint64_t)programID
+                                        movie:(uint64_t)movieID
+                                         slot:(NSInteger)slot
+    NS_SWIFT_NAME(saveStatePath(forProgram:movie:slot:));
+/// Copies a state file (a .cst) into the first free numbered slot of the game it belongs to
+/// (read from the file). Refused, and nothing is kept, when the file is not a state, or was made
+/// by a version of the app that cannot load it.
++ (AZSaveStateImport*)importSaveStateAtPath:(NSString*)path NS_SWIFT_NAME(importSaveState(atPath:));
 
 // Cheats of the running title.
 

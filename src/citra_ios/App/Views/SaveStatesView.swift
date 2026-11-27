@@ -5,6 +5,45 @@
 import AzaharCore
 import SwiftUI
 
+/// Moving save state files in and out of the app.
+enum SaveStateFiles {
+    /// Shares a state as a file named after its game (the share sheet: AirDrop, Save to Files, ...).
+    @MainActor
+    static func export(programID: UInt64, movieID: UInt64, slot: Int, title: String) {
+        guard let path = AZEmulator.saveStatePath(forProgram: programID, movie: movieID, slot: slot) else {
+            return
+        }
+        let bad = CharacterSet(charactersIn: "/:\\?%*|\"<>\n")
+        let name = title.components(separatedBy: bad).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "\(name) [\(String(format: "%016llX", programID))] slot \(slot).cst")
+        try? FileManager.default.removeItem(at: file)
+        do {
+            try FileManager.default.copyItem(atPath: path, toPath: file.path)
+        } catch {
+            return
+        }
+        DocumentImporter.share([file])
+    }
+
+    /// Lets the user pick a state file and puts it into a free slot of its game. `completion` gets
+    /// what to tell the user.
+    @MainActor
+    static func importFile(completion: @escaping @MainActor (String) -> Void) {
+        DocumentImporter.present { urls in
+            guard let url = urls.first else { return }
+            let result = AZEmulator.importSaveState(atPath: url.path)
+            try? FileManager.default.removeItem(at: url)
+            if result.slot >= 0 {
+                completion("The state was added to slot \(result.slot) of its game.")
+            } else {
+                completion(result.message ?? "The state could not be imported.")
+            }
+        }
+    }
+}
+
 /// Save and load states of the running game.
 struct SaveStatesView: View {
     enum Mode {
@@ -21,6 +60,7 @@ struct SaveStatesView: View {
     @State private var pendingOverwrite: Int?
     @State private var pendingLoad: Int?
     @State private var pendingDelete: Int?
+    @State private var importMessage: String?
 
     /// Slot 0 is the quick slot, 1 to 10 are numbered.
     private static let slotNumbers = Array(0...10)
@@ -40,6 +80,13 @@ struct SaveStatesView: View {
                         }
                         .contextMenu {
                             if slots[slot] != nil {
+                                Button {
+                                    SaveStateFiles.export(
+                                        programID: session.currentGame?.programID ?? 0, movieID: 0,
+                                        slot: slot, title: session.currentGame?.title ?? "State")
+                                } label: {
+                                    Label("Export State", systemImage: "square.and.arrow.up")
+                                }
                                 Button(role: .destructive) { pendingDelete = slot } label: {
                                     Label("Delete State", systemImage: "trash")
                                 }
@@ -47,13 +94,23 @@ struct SaveStatesView: View {
                         }
                 }
                 Section {
+                    Button {
+                        SaveStateFiles.importFile { message in
+                            importMessage = message
+                            reload()
+                        }
+                    } label: {
+                        Label("Import a State File…", systemImage: "square.and.arrow.down.on.square")
+                    }
                     NavigationLink {
                         SaveStateManagerView()
                     } label: {
                         Label("Manage All Save States", systemImage: "externaldrive")
                     }
                 } footer: {
-                    Text("Swipe a state to delete it. The manager lists the states of every game.")
+                    Text("Swipe a state to delete it, press and hold one to export it as a file. "
+                         + "Import adds a state file (.cst) to the first free slot of its game. "
+                         + "The manager lists the states of every game.")
                 }
                 if mode == .load {
                     Section {
@@ -72,6 +129,13 @@ struct SaveStatesView: View {
                 }
             }
             .onAppear(perform: reload)
+            .alert("Save State", isPresented: Binding(
+                get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(importMessage ?? "")
+            }
             .confirmationDialog("Delete this state? It cannot be restored.", isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible
@@ -183,6 +247,7 @@ struct SaveStateManagerView: View {
     @State private var pendingDelete: AZSaveStateEntry?
     @State private var pendingDeleteGame: UInt64?
     @State private var pendingDeleteAll = false
+    @State private var importMessage: String?
 
     /// The games that have states, the one with the newest state first.
     private var programIDs: [UInt64] {
@@ -230,6 +295,17 @@ struct SaveStateManagerView: View {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
+                            .swipeActions(edge: .leading) {
+                                Button {
+                                    SaveStateFiles.export(programID: entry.programID,
+                                                          movieID: entry.movieID,
+                                                          slot: entry.slot,
+                                                          title: title(of: entry.programID))
+                                } label: {
+                                    Label("Export", systemImage: "square.and.arrow.up")
+                                }
+                                .tint(.blue)
+                            }
                     }
                     Button("Delete All for This Game", role: .destructive) {
                         pendingDeleteGame = programID
@@ -243,8 +319,10 @@ struct SaveStateManagerView: View {
                 Section {
                     LabeledContent("All Save States", value: sizeText(total(of: entries)))
                 } footer: {
-                    Text("Swipe a state to delete it. Deleting cannot be undone. States made by "
-                         + "another version of the app are marked: they cannot be loaded.")
+                    Text("Swipe a state left to delete it, right to export it as a file. Deleting "
+                         + "cannot be undone. Import (the menu at the top) adds a state file to "
+                         + "the first free slot of its game. States made by another version of "
+                         + "the app are marked: they cannot be loaded.")
                 }
                 .listRowBackground(LGRowBackground())
             }
@@ -254,6 +332,14 @@ struct SaveStateManagerView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button {
+                        SaveStateFiles.importFile { message in
+                            importMessage = message
+                            reload()
+                        }
+                    } label: {
+                        Label("Import a State File…", systemImage: "square.and.arrow.down.on.square")
+                    }
                     Button(role: .destructive) { pendingDeleteAll = true } label: {
                         Label("Delete All Save States", systemImage: "trash")
                     }
@@ -265,6 +351,13 @@ struct SaveStateManagerView: View {
         }
         .lgSettingsStyle()
         .onAppear(perform: reload)
+        .alert("Save States", isPresented: Binding(
+            get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importMessage ?? "")
+        }
         .confirmationDialog("Delete this state? It cannot be restored.", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible
