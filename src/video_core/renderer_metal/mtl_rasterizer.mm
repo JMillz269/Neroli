@@ -1137,12 +1137,16 @@ void RasterizerMetal::ClearAll(bool flush) {
 }
 
 bool RasterizerMetal::CostProbeSkips(u64 fragment_hash, bool alpha_test, bool blended, bool lit) {
-    constexpr int FIXED_PHASES = 4; // everything, alpha-tested, blended, lit
+    // Every other phase draws everything, so each group left out sits between two measurements
+    // of the whole scene, also when the camera moves a little. Groups: alpha-tested, blended, lit,
+    // then each of the most used fragment shaders (counted while everything is drawn).
+    constexpr int FIXED_GROUPS = 3;
     const auto now = std::chrono::steady_clock::now();
     CostProbe& probe = cost_probe;
-    if (probe.phase < 0 || now - probe.start >= std::chrono::seconds{3}) {
-        if (probe.phase == 0) {
-            // The most used fragment shaders while everything was drawn, by draws.
+    if (probe.phase < 0 || now - probe.start >= std::chrono::seconds{2}) {
+        const bool was_baseline = probe.phase >= 0 && probe.phase % 2 == 0;
+        if (was_baseline && probe.next_group == 0) {
+            // A new round: the most used fragment shaders since the last one.
             probe.top.assign(probe.draws.begin(), probe.draws.end());
             std::sort(probe.top.begin(), probe.top.end(),
                       [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -1151,46 +1155,53 @@ bool RasterizerMetal::CostProbeSkips(u64 fragment_hash, bool alpha_test, bool bl
             }
             probe.draws.clear();
         }
-        probe.phase = probe.phase < 0
-                          ? 0
-                          : (probe.phase + 1) %
-                                (FIXED_PHASES + static_cast<int>(probe.top.size()));
+        probe.phase = probe.phase < 0 ? 0 : probe.phase + 1;
         probe.start = now;
-        switch (probe.phase) {
-        case 0:
+        if (probe.phase % 2 == 0) {
             LOG_INFO(Render, "GPU cost probe: drawing everything");
-            break;
-        case 1:
-            LOG_INFO(Render, "GPU cost probe: leaving out alpha-tested draws");
-            break;
-        case 2:
-            LOG_INFO(Render, "GPU cost probe: leaving out blended draws (not alpha-tested)");
-            break;
-        case 3:
-            LOG_INFO(Render, "GPU cost probe: leaving out lit draws (not alpha-tested or blended)");
-            break;
-        default: {
-            const auto& [hash, count] = probe.top[probe.phase - FIXED_PHASES];
-            LOG_INFO(Render,
-                     "GPU cost probe: leaving out fragment shader {:016x} ({} draws in 3 s with "
-                     "everything drawn)",
-                     hash, count);
-            break;
-        }
+        } else {
+            const int groups = FIXED_GROUPS + static_cast<int>(probe.top.size());
+            probe.group = probe.next_group % groups;
+            probe.next_group = probe.group + 1;
+            switch (probe.group) {
+            case 0:
+                LOG_INFO(Render, "GPU cost probe: leaving out alpha-tested draws");
+                break;
+            case 1:
+                LOG_INFO(Render, "GPU cost probe: leaving out blended draws (not alpha-tested)");
+                break;
+            case 2:
+                LOG_INFO(Render,
+                         "GPU cost probe: leaving out lit draws (not alpha-tested or blended)");
+                break;
+            default: {
+                const auto& [hash, count] = probe.top[probe.group - FIXED_GROUPS];
+                LOG_INFO(Render,
+                         "GPU cost probe: leaving out fragment shader {:016x} ({} draws while "
+                         "everything was drawn)",
+                         hash, count);
+                break;
+            }
+            }
+            // The round starts over (and the shaders are counted again) after the last group.
+            if (probe.next_group >= groups) {
+                probe.next_group = 0;
+            }
         }
     }
-    switch (probe.phase) {
-    case 0:
+    if (probe.phase % 2 == 0) {
         probe.draws[fragment_hash]++;
         return false;
-    case 1:
+    }
+    switch (probe.group) {
+    case 0:
         return alpha_test;
-    case 2:
+    case 1:
         return blended && !alpha_test;
-    case 3:
+    case 2:
         return lit && !alpha_test && !blended;
     default:
-        return fragment_hash == probe.top[probe.phase - FIXED_PHASES].first;
+        return fragment_hash == probe.top[probe.group - FIXED_GROUPS].first;
     }
 }
 

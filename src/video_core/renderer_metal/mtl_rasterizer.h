@@ -202,7 +202,9 @@ private:
     /// QualityOptions::cost_probe: whether the current phase leaves out this draw.
     bool CostProbeSkips(u64 fragment_hash, bool alpha_test, bool blended, bool lit);
     struct CostProbe {
-        int phase = -1;
+        int phase = -1; ///< Even: everything drawn; odd: `group` left out
+        int group = 0;
+        int next_group = 0;
         std::chrono::steady_clock::time_point start{};
         std::unordered_map<u64, u32> draws; ///< Per fragment shader, while everything is drawn
         std::vector<std::pair<u64, u32>> top;
