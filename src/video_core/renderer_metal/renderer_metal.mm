@@ -664,7 +664,9 @@ private:
     id<MTLComputePipelineState> fx_flow_refine = nil;
     id<MTLComputePipelineState> fx_flow_expand = nil;
     id<MTLComputePipelineState> fx_flow_median = nil;
-    id<MTLTexture> fx_flow_coarse_filtered = nil;
+    /// The cleaned coarse vectors of this frame and the last one (a prediction for this one).
+    std::array<id<MTLTexture>, 2> fx_flow_coarse_filtered{};
+    u32 fx_flow_coarse_index = 0;
     id<MTLTexture> fx_flow_blocks_filtered = nil;
     std::array<id<MTLTexture>, 2> fx_luma{};
     std::array<id<MTLTexture>, 2> fx_luma16{};
@@ -1955,12 +1957,17 @@ kernel void flow_top(texture2d<float, access::read> cur [[texture(0)]],
 
 /// Middle of the pyramid, 1/4 of the size: one vector per 4x4 pixels (16x16 of the picture),
 /// matched with an 8x8 window around them (a window larger than the block is less easily fooled
-/// by repeating patterns such as stairs). It searches near the top level's vector and near no
-/// motion, so it can follow both a turning camera and things standing still in front of it.
+/// by repeating patterns such as stairs). It searches near three predictions: the top level's
+/// vector (a turning camera), this block's vector of the previous frame (motion goes on much as
+/// it was: walking up stairs moves them by about the same amount every frame, which tells the
+/// right step from the one above or below that looks the same), and no motion (things standing
+/// still). Moving away from the nearest prediction costs something, so a look-alike further away
+/// only wins when it matches clearly better.
 kernel void flow_coarse(texture2d<float, access::read> cur [[texture(0)]],
                         texture2d<float, access::read> prev [[texture(1)]],
                         texture2d<float, access::read> top [[texture(2)]],
                         texture2d<float, access::write> out [[texture(3)]],
+                        texture2d<float, access::read> last [[texture(4)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
         return;
@@ -1968,19 +1975,32 @@ kernel void flow_coarse(texture2d<float, access::read> cur [[texture(0)]],
     const int2 size = int2(cur.get_width(), cur.get_height());
     const int2 origin = int2(gid) * 4 - 2;
     const uint2 top_id = min(gid / 2, uint2(top.get_width() - 1, top.get_height() - 1));
-    const int2 guide = int2(round(top.read(top_id).xy / 4.0));
+    int2 predictions[3];
+    predictions[0] = int2(round(top.read(top_id).xy / 4.0));
+    predictions[1] = int2(round(last.read(min(gid, uint2(last.get_width() - 1,
+                                                          last.get_height() - 1))).xy / 4.0));
+    predictions[2] = int2(0);
+    // The texture of the last frame is not written before the first frame: whatever it holds is
+    // kept within the search area of the top level.
+    predictions[1] = clamp(predictions[1], int2(-32), int2(32));
     float best = 1e9;
     int2 best_vector = int2(0);
-    for (int pass = 0; pass < 2; ++pass) {
-        const int2 center = pass == 0 ? guide : int2(0);
-        if (pass == 1 && all(guide == int2(0))) {
-            break;
+    for (int pass = 0; pass < 3; ++pass) {
+        const int2 center = predictions[pass];
+        if ((pass >= 1 && all(center == predictions[0])) ||
+            (pass == 2 && all(center == predictions[1]))) {
+            continue;
         }
         for (int dy = -3; dy <= 3; ++dy) {
             for (int dx = -3; dx <= 3; ++dx) {
                 const int2 v = center + int2(dx, dy);
+                int distance = 1 << 20;
+                for (int k = 0; k < 3; ++k) {
+                    distance = min(distance, abs(v.x - predictions[k].x) +
+                                                 abs(v.y - predictions[k].y));
+                }
                 const float sad = flow_sad(cur, prev, origin, v, 8, size) +
-                                  0.01 * float(abs(v.x - guide.x) + abs(v.y - guide.y));
+                                  0.06 * float(distance);
                 if (sad < best) {
                     best = sad;
                     best_vector = v;
@@ -2276,7 +2296,7 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_flow_top_filtered = nil;
     fx_flow_coarse_tex = nil;
     fx_flow_blocks = nil;
-    fx_flow_coarse_filtered = nil;
+    fx_flow_coarse_filtered = {};
     fx_flow_blocks_filtered = nil;
     fx_small_color = {};
     fx_small_out = nil;
@@ -2510,12 +2530,16 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_top_filtered = make_texture(MTLPixelFormatRG16Float, top_width, top_height);
         fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
-        fx_flow_coarse_filtered = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
+        fx_flow_coarse_filtered[0] =
+            make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
+        fx_flow_coarse_filtered[1] =
+            make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks_filtered = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
         if (fx_luma[0] == nil || fx_luma[1] == nil || fx_luma16[0] == nil ||
             fx_luma16[1] == nil || fx_flow_top_tex == nil || fx_flow_top_filtered == nil ||
             fx_flow_coarse_tex == nil ||
-            fx_flow_blocks == nil || fx_flow_coarse_filtered == nil ||
+            fx_flow_blocks == nil || fx_flow_coarse_filtered[0] == nil ||
+            fx_flow_coarse_filtered[1] == nil ||
             fx_flow_blocks_filtered == nil) {
             LOG_ERROR(Render, "Optical flow textures could not be made");
             fx_flow_failed = true;
@@ -2559,23 +2583,27 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:fx_flow_top_filtered atIndex:1];
         grid(encoder, top_width, top_height);
 
+        fx_flow_coarse_index ^= 1;
+        id<MTLTexture> coarse_now = fx_flow_coarse_filtered[fx_flow_coarse_index];
+        id<MTLTexture> coarse_last = fx_flow_coarse_filtered[fx_flow_coarse_index ^ 1];
         [encoder setComputePipelineState:fx_flow_coarse];
         [encoder setTexture:fx_luma[0] atIndex:0];
         [encoder setTexture:fx_luma[1] atIndex:1];
         [encoder setTexture:fx_flow_top_filtered atIndex:2];
         [encoder setTexture:fx_flow_coarse_tex atIndex:3];
+        [encoder setTexture:coarse_last atIndex:4];
         grid(encoder, coarse_width, coarse_height);
 
         // The coarse vectors, cleaned of outliers, steer the refinement.
         [encoder setComputePipelineState:fx_flow_median];
         [encoder setTexture:fx_flow_coarse_tex atIndex:0];
-        [encoder setTexture:fx_flow_coarse_filtered atIndex:1];
+        [encoder setTexture:coarse_now atIndex:1];
         grid(encoder, coarse_width, coarse_height);
 
         [encoder setComputePipelineState:fx_flow_refine];
         [encoder setTexture:color atIndex:0];
         [encoder setTexture:previous atIndex:1];
-        [encoder setTexture:fx_flow_coarse_filtered atIndex:2];
+        [encoder setTexture:coarse_now atIndex:2];
         [encoder setTexture:fx_flow_blocks atIndex:3];
         grid(encoder, block_width, block_height);
 
