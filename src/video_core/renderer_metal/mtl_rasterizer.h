@@ -179,8 +179,12 @@ private:
     struct DepthSnapshot {
         PAddr output = 0; ///< Where the display transfer wrote the picture
         id<MTLTexture> texture = nil;
-        u32 aspect_width = 0; ///< The proportions of the picture it was drawn with
-        u32 aspect_height = 0;
+        u32 out_width = 0; ///< The size of the picture the transfer wrote (before upscaling)
+        u32 out_height = 0;
+        /// The part of the depth buffer (of its width and height) the transfer copied: a game
+        /// drawing 480 pixels wide in a buffer 512 wide copies 480/512 of it.
+        f32 part_x = 1.0f;
+        f32 part_y = 1.0f;
         bool flip = false;
         bool reversed = false;
         u32 draws = 0;

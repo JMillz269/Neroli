@@ -1211,8 +1211,19 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
                                           sliceCount:1
                                           levelCount:1];
             slot->output = output;
-            slot->aspect_width = static_cast<u32>(best->color.width);
-            slot->aspect_height = static_cast<u32>(best->color.height);
+            // The transfer reads output_width x output_height pixels of rows input_width wide
+            // (input_height of them in the buffer) and writes them halved in width (ScaleX) or
+            // in both (ScaleXY), as the cache does (RasterizerCache::AccelerateDisplayTransfer).
+            const u32 out_width = config.output_width.Value();
+            const u32 out_height = config.output_height.Value();
+            slot->out_width = config.scaling != config.NoScale ? out_width / 2 : out_width;
+            slot->out_height = config.scaling == config.ScaleXY ? out_height / 2 : out_height;
+            slot->part_x = in_width > 0 ? std::min(1.0f, static_cast<f32>(out_width) /
+                                                             static_cast<f32>(in_width))
+                                        : 1.0f;
+            slot->part_y = in_height > 0 ? std::min(1.0f, static_cast<f32>(out_height) /
+                                                              static_cast<f32>(in_height))
+                                         : 1.0f;
             slot->flip = config.flip_vertically != 0;
             slot->reversed = best->greater > best->less;
             slot->draws = best->draws;
@@ -1241,16 +1252,19 @@ void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer
     bool flip = false;
     bool reversed = false;
     u32 draws = 0;
+    f32 part_x = 1.0f;
+    f32 part_y = 1.0f;
     const char* source = "";
     // A picture the game copied here with a display transfer: the depth saved then, when the
     // copy is the whole picture at the same proportions (its texture coordinates are then those
     // of the shown one).
     for (const auto& snapshot : depth_snapshots) {
         if (snapshot.output == framebuffer_addr && snapshot.texture != nil && covers_surface &&
-            SameAspect(snapshot.aspect_width, snapshot.aspect_height, shown.width,
-                       shown.height)) {
+            SameAspect(snapshot.out_width, snapshot.out_height, shown.width, shown.height)) {
             depth = snapshot.texture;
             flip = snapshot.flip;
+            part_x = snapshot.part_x;
+            part_y = snapshot.part_y;
             reversed = snapshot.reversed;
             draws = snapshot.draws;
             source = "saved at the display transfer";
@@ -1273,13 +1287,15 @@ void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer
     if (depth != nil) {
         screen_info.depth = depth;
         screen_info.depth_reversed = reversed;
-        screen_info.depth_texcoords = screen_info.texcoords;
-        if (flip) {
-            // The screens are stored rotated: the texture's y is in `left` and `right` (see
-            // AccelerateDisplay).
-            screen_info.depth_texcoords.left = 1.0f - screen_info.texcoords.left;
-            screen_info.depth_texcoords.right = 1.0f - screen_info.texcoords.right;
-        }
+        // The shown picture's coordinates in the part of the depth buffer the transfer copied.
+        // The screens are stored rotated: the texture's x is in `top` and `bottom`, its y in
+        // `left` and `right` (see AccelerateDisplay).
+        const auto& tc = screen_info.texcoords;
+        auto& dc = screen_info.depth_texcoords;
+        dc.top = tc.top * part_x;
+        dc.bottom = tc.bottom * part_x;
+        dc.left = (flip ? 1.0f - tc.left : tc.left) * part_y;
+        dc.right = (flip ? 1.0f - tc.right : tc.right) * part_y;
     }
 
     // Logged whenever what a screen gets changes.
@@ -1292,7 +1308,8 @@ void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer
         depth == nil ? 0
                      : ((static_cast<u64>(depth.width) << 40) ^
                         (static_cast<u64>(depth.height) << 20) ^ (source[0] == 's' ? 1 : 2) ^
-                        (flip ? 4 : 0) ^ (reversed ? 8 : 0) ^ (1ULL << 63));
+                        (flip ? 4 : 0) ^ (reversed ? 8 : 0) ^ (1ULL << 63) ^
+                        (static_cast<u64>(part_x * 1000.0f) << 4));
     for (auto& entry : logged) {
         if (entry.screen == &screen_info || entry.screen == nullptr) {
             if (entry.screen == nullptr || entry.signature != signature) {
@@ -1306,12 +1323,14 @@ void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer
                              static_cast<u32>(shown.height));
                 } else {
                     LOG_INFO(Render,
-                             "Frame generation depth: screen {:#010x} gets a {}x{} depth buffer "
-                             "({}, {} draws{}), nearer is {}",
-                             framebuffer_addr, static_cast<u32>(depth.width),
+                             "Frame generation depth: screen {:#010x} ({}x{}) gets a {}x{} "
+                             "depth buffer ({}, {} draws{}, {:.0f}% x {:.0f}% of it), nearer is "
+                             "{}",
+                             framebuffer_addr, static_cast<u32>(shown.width),
+                             static_cast<u32>(shown.height), static_cast<u32>(depth.width),
                              static_cast<u32>(depth.height), source, draws,
-                             flip ? ", flipped like the picture" : "",
-                             reversed ? "larger" : "smaller");
+                             flip ? ", flipped like the picture" : "", part_x * 100.0f,
+                             part_y * 100.0f, reversed ? "larger" : "smaller");
                 }
             }
             break;
