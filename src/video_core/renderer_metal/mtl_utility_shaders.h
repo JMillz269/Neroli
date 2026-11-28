@@ -376,6 +376,7 @@ fragment float4 present_interlaced_fs(PresentVOut in [[stage_in]],
 // the average luma difference of its best match.
 fragment float4 made_fallback_fs(PresentVOut in [[stage_in]], texture2d<float> real [[texture(0)]],
                                  texture2d<float> misfit [[texture(1)]],
+                                 texture2d<float> pixel_misfit [[texture(2)]],
                                  constant PresentUniforms& u [[buffer(1)]]) {
     constexpr sampler linear_sampler(filter::linear, address::clamp_to_edge);
     const float2 step = 1.0f / float2(misfit.get_width(), misfit.get_height());
@@ -385,7 +386,17 @@ fragment float4 made_fallback_fs(PresentVOut in [[stage_in]], texture2d<float> r
             m = max(m, misfit.sample(linear_sampler, in.tex_coord + float2(x, y) * step).r);
         }
     }
-    const float show = smoothstep(0.08f, 0.18f, m);
+    // Per pixel too (a thin part that moves on its own is a small part of its 8x8 block), taken
+    // over two pixels around so the real frame covers its edges.
+    const float2 pixel_step = 2.0f / float2(pixel_misfit.get_width(), pixel_misfit.get_height());
+    float p = 0.0f;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            p = max(p, pixel_misfit.sample(linear_sampler,
+                                           in.tex_coord + float2(x, y) * pixel_step).r);
+        }
+    }
+    const float show = max(smoothstep(0.08f, 0.18f, m), smoothstep(0.10f, 0.22f, p));
     if (show <= 0.0f) {
         discard_fragment();
     }
