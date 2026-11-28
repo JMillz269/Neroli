@@ -281,6 +281,8 @@ static_assert(sizeof(PresentUniforms) == 96);
 std::atomic<int> g_post_effect{0};
 std::atomic<int> g_sharp_pixels{0};
 std::atomic<int> g_sharpness{0};
+/// When MetalFX frame interpolation last asked for the game's depth (FrameGenerationDepthInUse).
+std::atomic<double> g_depth_asked_at{-10.0};
 std::atomic<int> g_sharpen_method{0};
 std::atomic<int> g_scale_filter{0};
 std::atomic<int> g_grid_strength{0};
@@ -2727,6 +2729,7 @@ void RendererMetal::EncodeFrameGenerationDepth(const Layout::FramebufferLayout& 
         }
     }
     if (wanted) {
+        g_depth_asked_at.store(CACurrentMediaTime(), std::memory_order_relaxed);
         (screen != nullptr ? fx_depth_with : fx_depth_without)++;
         if (fx_depth_with + fx_depth_without >= 300) {
             LOG_INFO(Render, "Frame generation depth: {} of the last {} interpolated frames had the "
@@ -3845,6 +3848,10 @@ std::chrono::steady_clock::time_point SnapDeadlineToDisplay(
         anchor + std::round((wanted - anchor - wake_after) / period) * period + wake_after;
     return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                      std::chrono::duration<double>(snapped - now_media));
+}
+
+bool FrameGenerationDepthInUse() {
+    return CACurrentMediaTime() - g_depth_asked_at.load(std::memory_order_relaxed) < 1.0;
 }
 
 void SetQualityOptions(const QualityOptions& options) {

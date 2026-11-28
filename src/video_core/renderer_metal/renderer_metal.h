@@ -223,6 +223,11 @@ struct QualityOptions {
 void SetQualityOptions(const QualityOptions& options);
 const QualityOptions& GetQualityOptions();
 
+/// Whether MetalFX frame interpolation asked for the game's depth in the last second: the
+/// rasterizer saves it only then (QualityOptions::frame_generation_depth alone is the setting,
+/// also while frame generation is off or made by VideoToolbox).
+bool FrameGenerationDepthInUse();
+
 /// Averages per presented frame since the previous call.
 struct FrameStats {
     double gpu_ms = 0.0;   ///< GPU time

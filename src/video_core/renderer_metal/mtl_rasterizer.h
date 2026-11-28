@@ -195,6 +195,10 @@ private:
 
     void NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater, bool less);
     void SnapshotDepth(const Pica::DisplayTransferConfig& config);
+    /// Draws a depth buffer into an R32Float texture of any size (the whole of it).
+    bool EncodeDepthCopy(id<MTLTexture> depth, id<MTLTexture> target);
+    id<MTLRenderPipelineState> depth_copy_pipeline = nil;
+    bool depth_copy_failed = false;
     void FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer_addr, bool covers_surface);
 };
 

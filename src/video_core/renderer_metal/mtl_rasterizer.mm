@@ -1118,7 +1118,7 @@ void RasterizerMetal::ClearAll(bool flush) {
 
 void RasterizerMetal::NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater,
                                     bool less) {
-    if (!GetQualityOptions().frame_generation_depth) {
+    if (!GetQualityOptions().frame_generation_depth || !FrameGenerationDepthInUse()) {
         return;
     }
     DepthCandidate* slot = nullptr;
@@ -1155,8 +1155,67 @@ bool SameAspect(u64 width_a, u64 height_a, u64 width_b, u64 height_b) {
 }
 } // Anonymous namespace
 
+bool RasterizerMetal::EncodeDepthCopy(id<MTLTexture> depth, id<MTLTexture> target) {
+    if (depth_copy_pipeline == nil) {
+        if (depth_copy_failed) {
+            return false;
+        }
+        static constexpr const char* source = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct DepthCopyOut {
+    float4 position [[position]];
+    float2 uv;
+};
+vertex DepthCopyOut depth_copy_vs(uint vid [[vertex_id]]) {
+    // One triangle over the whole target; the texture coordinates have y down.
+    const float2 p = float2((vid << 1) & 2, vid & 2);
+    DepthCopyOut o;
+    o.position = float4(p * 2.0f - 1.0f, 0.0f, 1.0f);
+    o.uv = float2(p.x, 1.0f - p.y);
+    return o;
+}
+fragment float depth_copy_fs(DepthCopyOut in [[stage_in]], depth2d<float> depth [[texture(0)]]) {
+    constexpr sampler s(filter::nearest, address::clamp_to_edge);
+    return depth.sample(s, in.uv);
+}
+)";
+        id<MTLDevice> device = depth.device;
+        NSError* error = nil;
+        id<MTLLibrary> library = [device newLibraryWithSource:@(source)
+                                                      options:[MTLCompileOptions new]
+                                                        error:&error];
+        if (library != nil) {
+            MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
+            desc.vertexFunction = [library newFunctionWithName:@"depth_copy_vs"];
+            desc.fragmentFunction = [library newFunctionWithName:@"depth_copy_fs"];
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+            depth_copy_pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        }
+        if (depth_copy_pipeline == nil) {
+            depth_copy_failed = true;
+            LOG_WARNING(Render, "Frame generation depth: no copy pipeline ({}), MetalFX gets none",
+                        error ? error.localizedDescription.UTF8String : "unknown error");
+            return false;
+        }
+    }
+    scheduler.EndEncoding();
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder =
+        [scheduler.CommandBuffer() renderCommandEncoderWithDescriptor:pass];
+    encoder.label = @"frame generation depth copy";
+    [encoder setRenderPipelineState:depth_copy_pipeline];
+    [encoder setFragmentTexture:depth atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    return true;
+}
+
 void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
-    if (!GetQualityOptions().frame_generation_depth) {
+    if (!GetQualityOptions().frame_generation_depth || !FrameGenerationDepthInUse()) {
         return;
     }
     // The picture copied out is the one most draws went into since the last transfer, with the
@@ -1211,28 +1270,35 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
             depth_candidates.fill({});
             return; // The copy goes where the picture already was: its depth is there
         }
-        id<MTLTexture> source = best != nullptr ? best->depth : again->texture;
-        if (slot->texture == nil || slot->texture.width != source.width ||
-            slot->texture.height != source.height ||
-            slot->texture.pixelFormat != source.pixelFormat) {
+        // A new picture's depth is drawn at half its size into a float texture: a fraction of a
+        // copy of the whole depth and stencil buffer (6.5 MB at 1024x800, twice a frame in
+        // Dragon Quest VIII). A picture copied out again gets a copy of that.
+        const bool fresh = best != nullptr;
+        id<MTLTexture> source = fresh ? best->depth : again->texture;
+        const NSUInteger width = fresh ? std::max<NSUInteger>(source.width / 2, 1) : source.width;
+        const NSUInteger height =
+            fresh ? std::max<NSUInteger>(source.height / 2, 1) : source.height;
+        if (slot->texture == nil || slot->texture.width != width ||
+            slot->texture.height != height) {
             MTLTextureDescriptor* desc =
-                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
-                                                                   width:source.width
-                                                                  height:source.height
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                   width:width
+                                                                  height:height
                                                                mipmapped:NO];
-            desc.usage = MTLTextureUsageShaderRead;
+            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
             desc.storageMode = MTLStorageModePrivate;
             slot->texture = [source.device newTextureWithDescriptor:desc];
         }
+        bool copied = false;
         if (slot->texture != nil) {
-            [scheduler.BlitEncoder() copyFromTexture:source
-                                         sourceSlice:0
-                                         sourceLevel:0
-                                           toTexture:slot->texture
-                                    destinationSlice:0
-                                    destinationLevel:0
-                                          sliceCount:1
-                                          levelCount:1];
+            if (fresh) {
+                copied = EncodeDepthCopy(source, slot->texture);
+            } else {
+                [scheduler.BlitEncoder() copyFromTexture:source toTexture:slot->texture];
+                copied = true;
+            }
+        }
+        if (copied) {
             if (best != nullptr) {
                 // The transfer reads output_width x output_height pixels of rows input_width
                 // wide (input_height of them in the buffer) and writes them halved in width
@@ -1287,7 +1353,7 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
 void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer_addr,
                                       bool covers_surface) {
     screen_info.depth = nil;
-    if (!GetQualityOptions().frame_generation_depth) {
+    if (!GetQualityOptions().frame_generation_depth || !FrameGenerationDepthInUse()) {
         return;
     }
     id<MTLTexture> shown = screen_info.texture;
