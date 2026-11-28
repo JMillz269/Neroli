@@ -1224,7 +1224,14 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
             slot->part_y = in_height > 0 ? std::min(1.0f, static_cast<f32>(out_height) /
                                                               static_cast<f32>(in_height))
                                          : 1.0f;
-            slot->flip = config.flip_vertically != 0;
+            // The cache flips the picture when it copies between a tiled and a linear surface
+            // (their rows run in opposite directions in its textures), and again for the
+            // transfer's own flip (RasterizerCache::AccelerateDisplayTransfer). A render target
+            // copied to a linear framebuffer without the flip flag is upside down relative to
+            // its depth buffer.
+            const bool src_tiled = !config.input_linear;
+            const bool dst_tiled = config.input_linear != config.dont_swizzle;
+            slot->flip = (src_tiled != dst_tiled) != (config.flip_vertically != 0);
             slot->reversed = best->greater > best->less;
             slot->draws = best->draws;
         } else {
