@@ -51,6 +51,7 @@
     config.vertexFastMath = YES;
     config.texturePool = YES;
     config.hiddenSurfaceRemoval = YES;
+    config.earlyDiscard = YES;
     config.fastWBufferDepth = YES;
     config.drawOptimizations = YES;
     config.antiAliasing = 0;

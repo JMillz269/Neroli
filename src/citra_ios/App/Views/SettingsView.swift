@@ -373,6 +373,7 @@ struct GraphicsSettingsView: View {
             HelpItem("Fast Depth Readback", "Answers the small depth checks some games do every frame (Mario Kart 7's sun glare) with the previous frame's values instead of waiting for the GPU."),
             HelpItem("Wait for GPU Each Frame", "Keeps the emulation at most one frame ahead of the GPU, which keeps frame pacing even. Off lets it run further ahead, which can help a game whose CPU and GPU work are both heavy, at the cost of more input latency and less even pacing."),
             HelpItem("Disable Right Eye Render", "Skips drawing the right eye's picture while 3D is off, which saves GPU work. Some games need it drawn (the game hacks know them)."),
+            HelpItem("Early Pixel Discard", "Lit see-through surfaces (grass, leaves, fences, smoke) work out which of their pixels are invisible before doing the lighting, and skip the lighting for those. Saves GPU time where such surfaces fill the screen. On by default; if a game shows missing or flickering edges on leaves or effects, or runs slower with it, turn it off for that game. Shaders are rebuilt when it changes."),
             HelpItem("Hidden Surface Removal", "Lets the GPU skip pixels hidden behind others (not for games using W-buffering)."),
             HelpItem("Fast W-Buffer Depth (Experimental)", "Helps games that use the 3DS's W-buffer depth mode (Dragon Quest VIII for most of its draws), which Hidden Surface Removal cannot: the depth stays exact, and the GPU can still skip pixels hidden behind ones already drawn. It relies on how games normally set up their 3D view; if parts of a scene go missing or flicker, turn it off for that game."),
             HelpItem("Draw Optimizations", "Draws depth-only geometry (like shadow volumes) without a pixel shader, does the scissor test with the GPU's own scissor, drops blending that changes nothing and draws partial clears inside the game's own render passes. Turn it off if a game shows glitches it did not have before."),
@@ -447,6 +448,7 @@ struct GraphicsSettingsView: View {
                 Toggle("Wait for GPU Each Frame", isOn: $settings.waitForGPU)
                 Toggle("Disable Right Eye Render", isOn: $settings.disableRightEyeRender)
                 Toggle("Hidden Surface Removal", isOn: $settings.hiddenSurfaceRemoval)
+                Toggle("Early Pixel Discard", isOn: $settings.earlyDiscard)
                 Toggle("Fast W-Buffer Depth (Experimental)", isOn: $settings.fastWBufferDepth)
                 Toggle("Draw Optimizations", isOn: $settings.drawOptimizations)
                 Picker("Texture Compression", selection: $settings.textureCompression) {

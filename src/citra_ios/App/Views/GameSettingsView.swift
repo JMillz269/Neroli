@@ -137,6 +137,7 @@ struct GameSettingsView: View {
                 OverrideToggle("Preload Game into Memory", value: $overrides.preloadGame)
                 OverrideToggle("Preload: Keep Compressed", value: $overrides.preloadGameCompressed)
                 OverrideToggle("Hidden Surface Removal", value: $overrides.hiddenSurfaceRemoval)
+                OverrideToggle("Early Pixel Discard", value: $overrides.earlyDiscard)
                 OverrideToggle("Fast W-Buffer Depth (Experimental)",
                                value: $overrides.fastWBufferDepth)
                 OverrideToggle("Draw Optimizations", value: $overrides.drawOptimizations)

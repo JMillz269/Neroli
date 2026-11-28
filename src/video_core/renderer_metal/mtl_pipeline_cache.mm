@@ -510,7 +510,12 @@ PipelineCache::ShaderHandle PipelineCache::UseFragmentShader(const Pica::RegsInt
         hash = Common::HashCombine(hash, 0x4A1F'1177'0000'0005ULL);
     }
     // Fully transparent pixels of a blended draw change nothing, see skip_transparent.
-    if (fs_config.lighting.enable.Value() != 0 && fs_config.framebuffer.alphablend_enable) {
+    metal_config.early_discard = GetQualityOptions().early_discard;
+    if (!metal_config.early_discard) {
+        hash = Common::HashCombine(hash, 0xEA21'0FF0'0000'0013ULL);
+    }
+    if (metal_config.early_discard && fs_config.lighting.enable.Value() != 0 &&
+        fs_config.framebuffer.alphablend_enable) {
         using Factor = Pica::FramebufferRegs::BlendFactor;
         using Equation = Pica::FramebufferRegs::BlendEquation;
         const auto& output_merger = regs.framebuffer.output_merger;

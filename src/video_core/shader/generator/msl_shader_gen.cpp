@@ -1974,7 +1974,8 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         // The gas mode replaces the output, the fog only its color.
         const bool skip_transparent = metal.skip_transparent &&
                                       config.texture.fog_mode != TexturingRegs::FogMode::Gas;
-        if (!config.lighting.enable || (!alpha_test && !skip_transparent) ||
+        if (!metal.early_discard || !config.lighting.enable ||
+            (!alpha_test && !skip_transparent) ||
             config.framebuffer.shadow_rendering || AlphaNeedsLighting()) {
             return;
         }

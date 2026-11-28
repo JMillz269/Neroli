@@ -118,6 +118,9 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL texturePool;
 /// Depth mapped in the vertex shader so the GPU's hidden surface removal works (next game).
 @property(nonatomic) BOOL hiddenSurfaceRemoval;
+/// Lit draws throw away pixels they would discard (alpha test, invisible blended pixels) before
+/// the lighting.
+@property(nonatomic) BOOL earlyDiscard;
 /// W-buffered draws keep the GPU's early depth test (conservative depth), experimental.
 @property(nonatomic) BOOL fastWBufferDepth;
 /// Depth/stencil-only draws without a fragment function, the scissor test as the GPU's scissor

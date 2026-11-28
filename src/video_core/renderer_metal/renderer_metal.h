@@ -124,6 +124,10 @@ struct QualityOptions {
     /// Map the depth in the vertex shader so fragment shaders do not write it, which keeps the
     /// hidden surface removal of Apple GPUs working (not for W-buffering).
     bool vertex_depth = false;
+    /// Lit draws that throw pixels away (alpha test, or blending where an alpha of 0 changes
+    /// nothing) compute the alpha before the lighting and throw those pixels away unlit
+    /// (MetalFSConfig::early_discard).
+    bool early_discard = true;
     /// W-buffered draws keep the GPU's early depth test: the vertices go to their exact W-buffer
     /// depth and the fragment shader writes the exact depth with a conservative output, see
     /// MSL::MetalFSConfig::conservative_w_depth. Experimental: an unusual projection could hide

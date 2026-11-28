@@ -72,6 +72,7 @@ struct GameOverrides: Codable, Equatable {
     var preloadGame: Bool?
     var preloadGameCompressed: Bool?
     var hiddenSurfaceRemoval: Bool?
+    var earlyDiscard: Bool?
     var drawOptimizations: Bool?
     var fastWBufferDepth: Bool?
     var antiAliasing: Int?
@@ -170,6 +171,7 @@ struct GameOverrides: Codable, Equatable {
         if let preloadGame { config.preloadGame = preloadGame }
         if let preloadGameCompressed { config.preloadGameCompressed = preloadGameCompressed }
         if let hiddenSurfaceRemoval { config.hiddenSurfaceRemoval = hiddenSurfaceRemoval }
+        if let earlyDiscard { config.earlyDiscard = earlyDiscard }
         if let drawOptimizations { config.drawOptimizations = drawOptimizations }
         if let fastWBufferDepth { config.fastWBufferDepth = fastWBufferDepth }
         if let antiAliasing { config.antiAliasing = antiAliasing }

@@ -344,6 +344,8 @@ final class AppSettings: ObservableObject {
     @Published var hiddenSurfaceRemoval: Bool {
         didSet { save(hiddenSurfaceRemoval, "hiddenSurfaceRemoval") }
     }
+    /// Lit draws throw away pixels before the lighting (alpha test, invisible blended pixels).
+    @Published var earlyDiscard: Bool { didSet { save(earlyDiscard, "earlyDiscard") } }
     @Published var textureCompression: TextureCompressionOption {
         didSet { save(textureCompression.rawValue, "textureCompression") }
     }
@@ -562,6 +564,7 @@ final class AppSettings: ObservableObject {
         texturePool = value("texturePool", true)
         fastDepthReadback = value("fastDepthReadback", true)
         hiddenSurfaceRemoval = value("hiddenSurfaceRemoval", true)
+        earlyDiscard = value("earlyDiscard", true)
         drawOptimizations = value("drawOptimizations", true)
         fastWBufferDepth = value("fastWBufferDepth", true)
         antiAliasing = value("antiAliasing", 0)
@@ -747,6 +750,7 @@ final class AppSettings: ObservableObject {
         config.texturePool = texturePool
         config.fastDepthReadback = fastDepthReadback
         config.hiddenSurfaceRemoval = hiddenSurfaceRemoval
+        config.earlyDiscard = earlyDiscard
         config.drawOptimizations = drawOptimizations
         config.fastWBufferDepth = fastWBufferDepth
         config.antiAliasing = antiAliasing

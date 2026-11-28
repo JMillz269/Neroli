@@ -122,6 +122,9 @@ struct MetalFSConfig {
     /// adding) and writes neither depth nor stencil: a lit draw then computes the alpha before
     /// the lighting and throws such pixels away without lighting them.
     bool skip_transparent = false;
+    /// The combiners' alpha and the alpha test once before the lighting, when the alpha does not
+    /// need it (WriteEarlyAlphaTest); with skip_transparent also the test for an alpha of 0.
+    bool early_discard = true;
     /// 2D textures are sampled with the GPU's own level of detail (from the screen-space
     /// derivatives, plus the PICA LOD bias) instead of the PICA formula computed in the shader
     /// and passed as an explicit level. An explicit level turns off the sampler's anisotropic
