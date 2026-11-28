@@ -702,8 +702,6 @@ private:
     id<MTLTexture> fx_flow_blocks = nil;
     /// Per 8x8 block, how far the best match is off (flow_refine), and whether it is this frame's.
     id<MTLTexture> fx_flow_misfit = nil;
-    /// Per pixel, how far the chosen move is off (flow_expand).
-    id<MTLTexture> fx_pixel_misfit = nil;
     bool fx_misfit_valid = false;
     /// Draws the real frame over the made one where no motion explains the change.
     id<MTLRenderPipelineState> made_fallback_pipeline = nil;
@@ -2179,14 +2177,12 @@ kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
                         texture2d<float, access::write> motion [[texture(1)]],
                         texture2d<float, access::read> cur [[texture(2)]],
                         texture2d<float, access::read> prev [[texture(3)]],
-                        texture2d<float, access::write> pixel_misfit [[texture(4)]],
                         constant uint& zero [[buffer(0)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= motion.get_width() || gid.y >= motion.get_height()) {
         return;
     }
     float2 flow = float2(0.0);
-    float misfit = 0.0;
     if (zero == 0) {
         constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
         const float2 size = float2(blocks.get_width(), blocks.get_height());
@@ -2201,9 +2197,7 @@ kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
         // Block centers are at (index + 0.5) * 8 pixels.
         const float2 blended = blocks.sample(s, (float2(gid) + 0.5) / (size * 8.0)).xy;
         // The blended vector wins unless another matches clearly better.
-        const float blended_cost = flow_match(prev, here, p, blended, last);
-        float best = blended_cost - 0.08;
-        float best_raw = blended_cost;
+        float best = flow_match(prev, here, p, blended, last) - 0.08;
         flow = blended;
         const int2 block = p / 8;
         for (int k = 0; k < 9; ++k) {
@@ -2212,16 +2206,10 @@ kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
             const float c = flow_match(prev, here, p, v, last);
             if (c < best) {
                 best = c;
-                best_raw = c;
                 flow = v;
             }
         }
-        // How far this pixel's chosen move is off, per pixel of its 3x3: high on the parts that
-        // move differently from everything around them (a swinging arm, a flapping bandana) and
-        // that no block's vector fits.
-        misfit = best_raw / 9.0;
     }
-    pixel_misfit.write(float4(misfit), gid);
     motion.write(float4(flow, 0.0, 0.0), gid);
 }
 )";
@@ -2427,7 +2415,6 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_flow_coarse_tex = nil;
     fx_flow_blocks = nil;
     fx_flow_misfit = nil;
-    fx_pixel_misfit = nil;
     fx_misfit_valid = false;
     fx_flow_coarse_filtered = {};
     fx_flow_blocks_filtered = nil;
@@ -2664,13 +2651,12 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
         fx_flow_misfit = make_texture(MTLPixelFormatR16Float, block_width, block_height);
-        fx_pixel_misfit = make_texture(MTLPixelFormatR16Float, width, height);
         fx_flow_coarse_filtered[0] =
             make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_coarse_filtered[1] =
             make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks_filtered = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
-        if (fx_flow_misfit == nil || fx_pixel_misfit == nil || fx_luma[0] == nil || fx_luma[1] == nil ||
+        if (fx_flow_misfit == nil || fx_luma[0] == nil || fx_luma[1] == nil ||
             fx_luma16[0] == nil ||
             fx_luma16[1] == nil || fx_flow_top_tex == nil || fx_flow_top_filtered == nil ||
             fx_flow_coarse_tex == nil ||
@@ -2756,7 +2742,6 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
     [encoder setTexture:fx_motion atIndex:1];
     [encoder setTexture:color atIndex:2];
     [encoder setTexture:previous atIndex:3];
-    [encoder setTexture:fx_pixel_misfit atIndex:4];
     [encoder setBytes:&zero_flag length:sizeof(zero_flag) atIndex:0];
     grid(encoder, width, height);
     [encoder endEncoding];
@@ -3077,8 +3062,7 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
                 // opening or closing, letters appearing, a cut), MetalFX morphs one picture into
                 // the other and shows scrambled halves. The newer real frame goes over those
                 // places instead, faded in by how far off the best match was.
-                if (fx_misfit_valid && fx_flow_misfit != nil && fx_pixel_misfit != nil &&
-                    made_fallback_pipeline != nil) {
+                if (fx_misfit_valid && fx_flow_misfit != nil && made_fallback_pipeline != nil) {
                     const std::array<ScreenRectVertex, 4> vertices{{
                         ScreenRectVertex(fg_area_x, fg_area_y, 0.0f, 0.0f),
                         ScreenRectVertex(fg_area_x + fg_area_width, fg_area_y, 1.0f, 0.0f),
@@ -3102,7 +3086,6 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
                     [compose setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:1];
                     [compose setFragmentTexture:current atIndex:0];
                     [compose setFragmentTexture:fx_flow_misfit atIndex:1];
-                    [compose setFragmentTexture:fx_pixel_misfit atIndex:2];
                     [compose drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0
                                 vertexCount:4];
                 }
