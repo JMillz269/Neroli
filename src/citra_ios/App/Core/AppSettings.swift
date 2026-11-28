@@ -334,6 +334,10 @@ final class AppSettings: ObservableObject {
     /// no-op blending dropped).
     @Published var drawOptimizations: Bool { didSet { save(drawOptimizations, "drawOptimizations") } }
     @Published var fastWBufferDepth: Bool { didSet { save(fastWBufferDepth, "fastWBufferDepth") } }
+    /// With Fast W-Buffer Depth: the depth only at the vertices, no depth from the pixel shaders.
+    @Published var vertexWBufferDepth: Bool {
+        didSet { save(vertexWBufferDepth, "vertexWBufferDepth") }
+    }
     /// MSAA: 0 off, 1 2x, 2 4x, 3 8x.
     @Published var antiAliasing: Int { didSet { save(antiAliasing, "antiAliasing") } }
     @Published var waitForGPU: Bool { didSet { save(waitForGPU, "waitForGPU") } }
@@ -567,6 +571,7 @@ final class AppSettings: ObservableObject {
         earlyDiscard = value("earlyDiscard", true)
         drawOptimizations = value("drawOptimizations", true)
         fastWBufferDepth = value("fastWBufferDepth", true)
+        vertexWBufferDepth = value("vertexWBufferDepth", false)
         antiAliasing = value("antiAliasing", 0)
         waitForGPU = value("waitForGPU", true)
         gpuPassTiming = value("gpuPassTiming", false)
@@ -753,6 +758,7 @@ final class AppSettings: ObservableObject {
         config.earlyDiscard = earlyDiscard
         config.drawOptimizations = drawOptimizations
         config.fastWBufferDepth = fastWBufferDepth
+        config.vertexWBufferDepth = vertexWBufferDepth
         config.antiAliasing = antiAliasing
         config.waitForGPU = waitForGPU
         config.gpuPassTiming = gpuPassTiming

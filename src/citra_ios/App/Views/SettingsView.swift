@@ -375,6 +375,7 @@ struct GraphicsSettingsView: View {
             HelpItem("Disable Right Eye Render", "Skips drawing the right eye's picture while 3D is off, which saves GPU work. Some games need it drawn (the game hacks know them)."),
             HelpItem("Early Pixel Discard", "Lit see-through surfaces (grass, leaves, fences, smoke) work out which of their pixels are invisible before doing the lighting, and skip the lighting for those. Saves GPU time where such surfaces fill the screen. On by default; if a game shows missing or flickering edges on leaves or effects, or runs slower with it, turn it off for that game. Shaders are rebuilt when it changes."),
             HelpItem("Hidden Surface Removal", "Lets the GPU skip pixels hidden behind others (not for games using W-buffering)."),
+            HelpItem("W-Buffer Depth: Vertices Only (Experimental)", "The fastest way to draw games that use W-buffering (Dragon Quest VIII and others): the depth is exact at the corners of each triangle and the GPU fills in the rest itself, instead of every pixel computing its own. That lets the GPU skip and order pixels on its own, which matters most for many see-through layers over each other (grass, foliage). Inside large triangles the depth can be off by a little, which can show as flickering where two surfaces almost touch, or things poking through each other; if that happens, turn it off for that game. Needs Fast W-Buffer Depth on. Takes effect the next time a game starts."),
             HelpItem("Fast W-Buffer Depth (Experimental)", "Helps games that use the 3DS's W-buffer depth mode (Dragon Quest VIII for most of its draws), which Hidden Surface Removal cannot: the depth stays exact, and the GPU can still skip pixels hidden behind ones already drawn. It relies on how games normally set up their 3D view; if parts of a scene go missing or flicker, turn it off for that game."),
             HelpItem("Draw Optimizations", "Draws depth-only geometry (like shadow volumes) without a pixel shader, does the scissor test with the GPU's own scissor, drops blending that changes nothing and draws partial clears inside the game's own render passes. Turn it off if a game shows glitches it did not have before."),
             HelpItem("Texture Compression", "Saves GPU memory bandwidth: Lossless looks identical, Lossy (A15 and later) saves more with a tiny loss of quality."),
@@ -450,6 +451,9 @@ struct GraphicsSettingsView: View {
                 Toggle("Hidden Surface Removal", isOn: $settings.hiddenSurfaceRemoval)
                 Toggle("Early Pixel Discard", isOn: $settings.earlyDiscard)
                 Toggle("Fast W-Buffer Depth (Experimental)", isOn: $settings.fastWBufferDepth)
+                Toggle("W-Buffer Depth: Vertices Only (Experimental)",
+                       isOn: $settings.vertexWBufferDepth)
+                    .disabled(!settings.fastWBufferDepth)
                 Toggle("Draw Optimizations", isOn: $settings.drawOptimizations)
                 Picker("Texture Compression", selection: $settings.textureCompression) {
                     ForEach(TextureCompressionOption.allCases) { Text($0.title).tag($0) }

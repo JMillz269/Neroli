@@ -133,6 +133,12 @@ struct QualityOptions {
     /// MSL::MetalFSConfig::conservative_w_depth. Experimental: an unusual projection could hide
     /// pixels that should show.
     bool conservative_w_depth = false;
+    /// With conservative_w_depth: the fragment shader does not write the depth at all, the GPU
+    /// interpolates the vertices' exact W-buffer depth linearly on the screen. Exact at the
+    /// vertices and close inside small triangles, a little off inside large ones; in exchange the
+    /// GPU does all of its depth testing itself before the shader, also for alpha-tested and
+    /// blended layers (which with a depth written by the shader wait for each other per pixel).
+    bool vertex_w_depth = false;
     /// Draw-time optimizations: depth/stencil-only draws without a fragment function, the
     /// scissor test inside the box as the GPU scissor rectangle, and blending that keeps the
     /// source color drawn unblended. Off draws as before they existed.

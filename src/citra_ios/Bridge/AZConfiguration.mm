@@ -53,6 +53,7 @@
     config.hiddenSurfaceRemoval = YES;
     config.earlyDiscard = YES;
     config.fastWBufferDepth = YES;
+    config.vertexWBufferDepth = NO;
     config.drawOptimizations = YES;
     config.antiAliasing = 0;
     config.waitForGPU = YES;

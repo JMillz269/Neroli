@@ -716,6 +716,7 @@ const char* ThermalStateName() {
     quality.vertex_depth = configuration.hiddenSurfaceRemoval;
     quality.early_discard = configuration.earlyDiscard;
     quality.conservative_w_depth = configuration.fastWBufferDepth;
+    quality.vertex_w_depth = configuration.fastWBufferDepth && configuration.vertexWBufferDepth;
     quality.draw_optimizations = configuration.drawOptimizations;
     quality.wait_for_gpu = configuration.waitForGPU;
     quality.gpu_pass_timing = configuration.gpuPassTiming;
@@ -749,9 +750,10 @@ const char* ThermalStateName() {
     LOG_INFO(Frontend,
              "Graphics: resolution {}x, MSAA setting {}, anisotropic filtering {}x (not for "
              "alpha-tested draws), hidden surface removal {}, early pixel discard {}, fast "
-             "W-buffer depth {}",
+             "W-buffer depth {} (in the vertices only: {})",
              configuration.resolutionFactor, configuration.antiAliasing, quality.max_anisotropy,
-             quality.vertex_depth, quality.early_discard, configuration.fastWBufferDepth);
+             quality.vertex_depth, quality.early_discard, configuration.fastWBufferDepth,
+             quality.vertex_w_depth);
     // Camera slots: 0 outer right, 1 inner, 2 outer left.
     const auto set_camera = [&](std::size_t slot, NSInteger choice) {
         values.camera_name[slot] = choice == 0 ? "blank" : Camera::IOS_CAMERA_NAME;

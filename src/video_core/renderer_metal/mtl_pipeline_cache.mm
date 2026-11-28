@@ -497,6 +497,14 @@ PipelineCache::ShaderHandle PipelineCache::UseFragmentShader(const Pica::RegsInt
         hash = Common::HashCombine(hash, 0x0DE9'7400'0000'0002ULL);
     }
     metal_config.conservative_w_depth = ConservativeWDepth(regs, has_depth_attachment);
+    if (metal_config.conservative_w_depth != 0 && GetQualityOptions().vertex_w_depth) {
+        // The vertices are at their exact W-buffer depth (the rasterizer sets that up for the
+        // conservative depth); the fragment shader takes the rasterized depth as it is, like
+        // with the depth mapped in the vertex shader, and writes none.
+        metal_config.conservative_w_depth = 0;
+        metal_config.vertex_depth = true;
+        hash = Common::HashCombine(hash, 0x7E27'DE97'0000'0014ULL);
+    }
     if (metal_config.conservative_w_depth != 0) {
         hash = Common::HashCombine(hash, 0xC0DE'0000'0000'0010ULL + metal_config.conservative_w_depth);
     }

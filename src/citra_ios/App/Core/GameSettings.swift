@@ -75,6 +75,7 @@ struct GameOverrides: Codable, Equatable {
     var earlyDiscard: Bool?
     var drawOptimizations: Bool?
     var fastWBufferDepth: Bool?
+    var vertexWBufferDepth: Bool?
     var antiAliasing: Int?
     var waitForGPU: Bool?
     var textureCompression: Int?
@@ -174,6 +175,7 @@ struct GameOverrides: Codable, Equatable {
         if let earlyDiscard { config.earlyDiscard = earlyDiscard }
         if let drawOptimizations { config.drawOptimizations = drawOptimizations }
         if let fastWBufferDepth { config.fastWBufferDepth = fastWBufferDepth }
+        if let vertexWBufferDepth { config.vertexWBufferDepth = vertexWBufferDepth }
         if let antiAliasing { config.antiAliasing = antiAliasing }
         if let waitForGPU { config.waitForGPU = waitForGPU }
         if let textureCompression { config.textureCompression = textureCompression }

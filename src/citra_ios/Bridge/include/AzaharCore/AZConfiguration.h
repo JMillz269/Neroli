@@ -123,6 +123,8 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL earlyDiscard;
 /// W-buffered draws keep the GPU's early depth test (conservative depth), experimental.
 @property(nonatomic) BOOL fastWBufferDepth;
+/// With fastWBufferDepth: no depth written by the fragment shaders of W-buffered draws.
+@property(nonatomic) BOOL vertexWBufferDepth;
 /// Depth/stencil-only draws without a fragment function, the scissor test as the GPU's scissor
 /// rectangle and no-op blending dropped. Off draws the way it was done before.
 @property(nonatomic) BOOL drawOptimizations;

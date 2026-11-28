@@ -140,6 +140,8 @@ struct GameSettingsView: View {
                 OverrideToggle("Early Pixel Discard", value: $overrides.earlyDiscard)
                 OverrideToggle("Fast W-Buffer Depth (Experimental)",
                                value: $overrides.fastWBufferDepth)
+                OverrideToggle("W-Buffer Depth: Vertices Only (Experimental)",
+                               value: $overrides.vertexWBufferDepth)
                 OverrideToggle("Draw Optimizations", value: $overrides.drawOptimizations)
                 OverridePicker("Texture Compression", value: $overrides.textureCompression,
                                options: TextureCompressionOption.allCases.map(\.rawValue)) {
