@@ -1934,6 +1934,70 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         out += fmt::format("        fs_out.color = float4(({}) & uint4(0xFFu)) / 255.0f;\n", op);
     }
 
+    /// Whether the alpha that leaves the combiners can be computed without the lighting: no
+    /// stage's alpha reads the fragment lighting colors (a Dot3_RGBA stage's alpha is its color).
+    bool AlphaNeedsLighting() const {
+        using Source = TevStageConfig::Source;
+        for (u32 index = 0; index < config.texture.tev_stages.size(); index++) {
+            const TevStageConfig stage = config.texture.tev_stages[index];
+            if (IsPassThroughTevStage(stage)) {
+                continue;
+            }
+            const bool dot3 = stage.color_op == TevStageConfig::Operation::Dot3_RGBA;
+            const std::array<Source, 3> sources =
+                dot3 ? std::array<Source, 3>{stage.color_source1.Value(),
+                                             stage.color_source2.Value(),
+                                             stage.color_source3.Value()}
+                     : std::array<Source, 3>{stage.alpha_source1.Value(),
+                                             stage.alpha_source2.Value(),
+                                             stage.alpha_source3.Value()};
+            for (const Source source : sources) {
+                if (source == Source::PrimaryFragmentColor ||
+                    source == Source::SecondaryFragmentColor) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// The combiners and the alpha test once before the lighting (WriteMain), in a block of
+    /// their own. Only the alpha is used, the compiler drops the color work it does not need.
+    /// With fast color math the code is the same half precision code as the real combiners, so
+    /// a pixel is thrown away here exactly when the test after them would throw it away.
+    void WriteEarlyAlphaTest() {
+        using CompareFunc = FramebufferRegs::CompareFunc;
+        const CompareFunc func = config.framebuffer.alpha_test_func;
+        if (!config.lighting.enable || func == CompareFunc::Always ||
+            func == CompareFunc::Never || config.framebuffer.shadow_rendering ||
+            AlphaNeedsLighting()) {
+            return;
+        }
+        out += "        {\n";
+        const std::size_t start = out.size();
+        out += "        float4 combiner_buffer = float4(0.0f);\n"
+               "        float4 next_combiner_buffer = float4(fs.tev_combiner_buffer_color);\n"
+               "        float4 combiner_output = float4(0.0f);\n"
+               "        float3 color_results_1 = float3(0.0f);\n"
+               "        float3 color_results_2 = float3(0.0f);\n"
+               "        float3 color_results_3 = float3(0.0f);\n"
+               "        float alpha_results_1 = 0.0f;\n"
+               "        float alpha_results_2 = 0.0f;\n"
+               "        float alpha_results_3 = 0.0f;\n";
+        for (u32 index = 0; index < config.texture.tev_stages.size(); index++) {
+            WriteTevStage(index);
+        }
+        if (metal.fast_color) {
+            const std::string block = ToHalfPrecision(out.substr(start));
+            out.resize(start);
+            out += "        float4 combiner_output;\n        {\n";
+            out += block;
+            out += "        combiner_output = float4(tev_out);\n        }\n";
+        }
+        WriteAlphaTestCondition(func);
+        out += "        }\n";
+    }
+
     void WriteMain() {
         out += R"(
     FSOutput run() {
@@ -1956,9 +2020,6 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
         // Append the scissor and depth tests
         WriteScissor();
         WriteDepth();
-
-        // Write shader source to emulate all enabled PICA lights
-        WriteLighting();
 
         // With fast color math every texture unit the combiners read is sampled once, straight
         // into half precision, instead of at every use.
@@ -1985,6 +2046,14 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
                 }
             }
         }
+
+        // Alpha test before the lighting, when the alpha does not need it: the pixels it throws
+        // away (the see-through parts of grass, leaves, fences) skip the lighting, the most
+        // expensive part of the shader. The test is repeated after the combiners as before.
+        WriteEarlyAlphaTest();
+
+        // Write shader source to emulate all enabled PICA lights
+        WriteLighting();
 
         // With fast color math the combiner code below is turned into half precision code in a
         // block of its own, which hands its result back as the float combiner_output.
