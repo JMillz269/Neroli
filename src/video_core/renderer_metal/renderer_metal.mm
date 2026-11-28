@@ -667,6 +667,11 @@ private:
     id<MTLTexture> fx_flow_coarse_filtered = nil;
     id<MTLTexture> fx_flow_blocks_filtered = nil;
     std::array<id<MTLTexture>, 2> fx_luma{};
+    std::array<id<MTLTexture>, 2> fx_luma16{};
+    id<MTLTexture> fx_flow_top_tex = nil;
+    id<MTLTexture> fx_flow_top_filtered = nil;
+    id<MTLComputePipelineState> fx_flow_down_luma = nil;
+    id<MTLComputePipelineState> fx_flow_top = nil;
     id<MTLTexture> fx_flow_coarse_tex = nil;
     id<MTLTexture> fx_flow_blocks = nil;
     bool fx_flow_failed{false};
@@ -1890,31 +1895,96 @@ kernel void flow_down(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(sum / 16.0), gid);
 }
 
+/// Averages 4x4 pixels of a luma texture (the second level of the pyramid, 1/16 of the size).
+kernel void flow_down_luma(texture2d<float, access::read> src [[texture(0)]],
+                           texture2d<float, access::write> dst [[texture(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) {
+        return;
+    }
+    const uint2 last = uint2(src.get_width() - 1, src.get_height() - 1);
+    float sum = 0.0;
+    for (uint y = 0; y < 4; ++y) {
+        for (uint x = 0; x < 4; ++x) {
+            sum += src.read(min(gid * 4 + uint2(x, y), last)).x;
+        }
+    }
+    dst.write(float4(sum / 16.0), gid);
+}
+
+/// Sum of absolute differences of a window of `cur` at `origin` against `prev` moved by `v`.
+static float flow_sad(texture2d<float, access::read> cur, texture2d<float, access::read> prev,
+                      int2 origin, int2 v, int n, int2 size) {
+    float sad = 0.0;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int2 p = clamp(origin + int2(x, y), int2(0), size - 1);
+            const int2 q = clamp(origin + int2(x, y) + v, int2(0), size - 1);
+            sad += abs(cur.read(uint2(p)).x - prev.read(uint2(q)).x);
+        }
+    }
+    return sad;
+}
+
+/// Top of the pyramid, 1/16 of the size: one vector per 2x2 pixels (32x32 of the picture),
+/// matched with a 6x6 window around them, up to 6 pixels (96 of the picture) each way. This is
+/// what catches a camera turning, which moves the whole picture far between two frames.
+kernel void flow_top(texture2d<float, access::read> cur [[texture(0)]],
+                     texture2d<float, access::read> prev [[texture(1)]],
+                     texture2d<float, access::write> out [[texture(2)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
+        return;
+    }
+    const int2 size = int2(cur.get_width(), cur.get_height());
+    const int2 origin = int2(gid) * 2 - 2;
+    float best = flow_sad(cur, prev, origin, int2(0), 6, size);
+    int2 best_vector = int2(0);
+    for (int dy = -6; dy <= 6; ++dy) {
+        for (int dx = -6; dx <= 6; ++dx) {
+            const float sad = flow_sad(cur, prev, origin, int2(dx, dy), 6, size) +
+                              0.02 * float(abs(dx) + abs(dy));
+            if (sad < best) {
+                best = sad;
+                best_vector = int2(dx, dy);
+            }
+        }
+    }
+    out.write(float4(float2(best_vector * 16), 0.0, 0.0), gid);
+}
+
+/// Middle of the pyramid, 1/4 of the size: one vector per 4x4 pixels (16x16 of the picture),
+/// matched with an 8x8 window around them (a window larger than the block is less easily fooled
+/// by repeating patterns such as stairs). It searches near the top level's vector and near no
+/// motion, so it can follow both a turning camera and things standing still in front of it.
 kernel void flow_coarse(texture2d<float, access::read> cur [[texture(0)]],
                         texture2d<float, access::read> prev [[texture(1)]],
-                        texture2d<float, access::write> out [[texture(2)]],
+                        texture2d<float, access::read> top [[texture(2)]],
+                        texture2d<float, access::write> out [[texture(3)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
         return;
     }
     const int2 size = int2(cur.get_width(), cur.get_height());
-    const int2 origin = int2(gid) * 4;
-    float block[16];
-    for (int i = 0; i < 16; ++i) {
-        block[i] = cur.read(uint2(min(origin + int2(i & 3, i >> 2), size - 1))).x;
-    }
+    const int2 origin = int2(gid) * 4 - 2;
+    const uint2 top_id = min(gid / 2, uint2(top.get_width() - 1, top.get_height() - 1));
+    const int2 guide = int2(round(top.read(top_id).xy / 4.0));
     float best = 1e9;
     int2 best_vector = int2(0);
-    for (int dy = -8; dy <= 8; ++dy) {
-        for (int dx = -8; dx <= 8; ++dx) {
-            float sad = 0.01 * float(abs(dx) + abs(dy));
-            for (int i = 0; i < 16; ++i) {
-                const int2 q = clamp(origin + int2(i & 3, i >> 2) + int2(dx, dy), int2(0), size - 1);
-                sad += abs(block[i] - prev.read(uint2(q)).x);
-            }
-            if (sad < best) {
-                best = sad;
-                best_vector = int2(dx, dy);
+    for (int pass = 0; pass < 2; ++pass) {
+        const int2 center = pass == 0 ? guide : int2(0);
+        if (pass == 1 && all(guide == int2(0))) {
+            break;
+        }
+        for (int dy = -3; dy <= 3; ++dy) {
+            for (int dx = -3; dx <= 3; ++dx) {
+                const int2 v = center + int2(dx, dy);
+                const float sad = flow_sad(cur, prev, origin, v, 8, size) +
+                                  0.01 * float(abs(v.x - guide.x) + abs(v.y - guide.y));
+                if (sad < best) {
+                    best = sad;
+                    best_vector = v;
+                }
             }
         }
     }
@@ -1938,7 +2008,6 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
         block[i] = dot(cur.read(uint2(min(origin + int2(i & 7, i >> 3), size - 1))).rgb, kLuma);
     }
     float best = 1e9;
-    float best_error = 1e9;
     int2 best_vector = int2(0);
     // Around the coarse vector, and no motion at all.
     for (int k = -1; k < 25; ++k) {
@@ -1948,19 +2017,13 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
             const int2 q = clamp(origin + int2(i & 7, i >> 3) + v, int2(0), size - 1);
             error += abs(block[i] - dot(prev.read(uint2(q)).rgb, kLuma));
         }
-        const float sad = error + 0.02 * float(abs(v.x) + abs(v.y));
+        // Small steps away from the coarse vector cost a little, so a flat or repeating area
+        // keeps its neighbours' motion instead of jumping to another look-alike.
+        const float sad = error + 0.02 * float(abs(v.x - center.x) + abs(v.y - center.y));
         if (sad < best) {
             best = sad;
-            best_error = error;
             best_vector = v;
         }
-    }
-    // Where even the best match is poor (something uncovered, covered or changing: the content
-    // does not move as one piece there) a vector would only drag the old picture over the new
-    // one. No motion lets MetalFX blend the two frames as they are, which is what its depth
-    // would otherwise tell it for covered and uncovered areas.
-    if (best_error / 64.0 > 0.12) {
-        best_vector = int2(0);
     }
     blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
 }
@@ -2208,6 +2271,9 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_depth = nil;
     fx_motion = nil;
     fx_luma = {};
+    fx_luma16 = {};
+    fx_flow_top_tex = nil;
+    fx_flow_top_filtered = nil;
     fx_flow_coarse_tex = nil;
     fx_flow_blocks = nil;
     fx_flow_coarse_filtered = nil;
@@ -2402,7 +2468,9 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_refine = make(@"flow_refine");
         fx_flow_expand = make(@"flow_expand");
         fx_flow_median = make(@"flow_median");
-        if (fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
+        fx_flow_down_luma = make(@"flow_down_luma");
+        fx_flow_top = make(@"flow_top");
+        if (fx_flow_down_luma == nil || fx_flow_top == nil || fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
             fx_flow_expand == nil || fx_flow_median == nil) {
             LOG_ERROR(Render, "Optical flow shaders failed: {}; MetalFX gets no motion vectors",
                       error ? error.localizedDescription.UTF8String : "unknown error");
@@ -2417,6 +2485,10 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
     const u32 luma_height = (height + 3) / 4;
     const u32 coarse_width = (luma_width + 3) / 4;
     const u32 coarse_height = (luma_height + 3) / 4;
+    const u32 luma16_width = (luma_width + 3) / 4;
+    const u32 luma16_height = (luma_height + 3) / 4;
+    const u32 top_width = (luma16_width + 1) / 2;
+    const u32 top_height = (luma16_height + 1) / 2;
     const u32 block_width = (width + 7) / 8;
     const u32 block_height = (height + 7) / 8;
     if (fx_flow_blocks == nil) {
@@ -2432,11 +2504,17 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         };
         fx_luma[0] = make_texture(MTLPixelFormatR16Float, luma_width, luma_height);
         fx_luma[1] = make_texture(MTLPixelFormatR16Float, luma_width, luma_height);
+        fx_luma16[0] = make_texture(MTLPixelFormatR16Float, luma16_width, luma16_height);
+        fx_luma16[1] = make_texture(MTLPixelFormatR16Float, luma16_width, luma16_height);
+        fx_flow_top_tex = make_texture(MTLPixelFormatRG16Float, top_width, top_height);
+        fx_flow_top_filtered = make_texture(MTLPixelFormatRG16Float, top_width, top_height);
         fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
         fx_flow_coarse_filtered = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks_filtered = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
-        if (fx_luma[0] == nil || fx_luma[1] == nil || fx_flow_coarse_tex == nil ||
+        if (fx_luma[0] == nil || fx_luma[1] == nil || fx_luma16[0] == nil ||
+            fx_luma16[1] == nil || fx_flow_top_tex == nil || fx_flow_top_filtered == nil ||
+            fx_flow_coarse_tex == nil ||
             fx_flow_blocks == nil || fx_flow_coarse_filtered == nil ||
             fx_flow_blocks_filtered == nil) {
             LOG_ERROR(Render, "Optical flow textures could not be made");
@@ -2444,7 +2522,8 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
             return;
         }
         LOG_INFO(Render, "MetalFX frame interpolation gets motion vectors from an optical flow "
-                         "pass ({}x{}, one vector per 8x8 pixels)",
+                         "pass ({}x{}, one vector per 8x8 pixels, a three-level search reaching "
+                         "96 pixels)",
                  width, height);
     }
 
@@ -2462,10 +2541,29 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:fx_luma[1] atIndex:1];
         grid(encoder, luma_width, luma_height);
 
+        [encoder setComputePipelineState:fx_flow_down_luma];
+        for (int i = 0; i < 2; ++i) {
+            [encoder setTexture:fx_luma[i] atIndex:0];
+            [encoder setTexture:fx_luma16[i] atIndex:1];
+            grid(encoder, luma16_width, luma16_height);
+        }
+
+        [encoder setComputePipelineState:fx_flow_top];
+        [encoder setTexture:fx_luma16[0] atIndex:0];
+        [encoder setTexture:fx_luma16[1] atIndex:1];
+        [encoder setTexture:fx_flow_top_tex atIndex:2];
+        grid(encoder, top_width, top_height);
+
+        [encoder setComputePipelineState:fx_flow_median];
+        [encoder setTexture:fx_flow_top_tex atIndex:0];
+        [encoder setTexture:fx_flow_top_filtered atIndex:1];
+        grid(encoder, top_width, top_height);
+
         [encoder setComputePipelineState:fx_flow_coarse];
         [encoder setTexture:fx_luma[0] atIndex:0];
         [encoder setTexture:fx_luma[1] atIndex:1];
-        [encoder setTexture:fx_flow_coarse_tex atIndex:2];
+        [encoder setTexture:fx_flow_top_filtered atIndex:2];
+        [encoder setTexture:fx_flow_coarse_tex atIndex:3];
         grid(encoder, coarse_width, coarse_height);
 
         // The coarse vectors, cleaned of outliers, steer the refinement.
