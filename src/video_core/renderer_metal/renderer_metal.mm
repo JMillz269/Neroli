@@ -2087,6 +2087,7 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
                         texture2d<float, access::read> coarse [[texture(2)]],
                         texture2d<float, access::write> blocks [[texture(3)]],
                         texture2d<float, access::write> misfit [[texture(4)]],
+                        texture2d<float, access::read> top [[texture(5)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= blocks.get_width() || gid.y >= blocks.get_height()) {
         return;
@@ -2101,6 +2102,7 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
     }
     float best = 1e9;
     float best_error = 0.0;
+    float still_error = 0.0;
     int2 best_vector = int2(0);
     // Around the coarse vector, and no motion at all.
     for (int k = -1; k < 25; ++k) {
@@ -2113,6 +2115,9 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
         // Small steps away from the coarse vector cost a little, so a flat or repeating area
         // keeps its neighbours' motion instead of jumping to another look-alike.
         const float sad = error + 0.02 * float(abs(v.x - center.x) + abs(v.y - center.y));
+        if (k < 0) {
+            still_error = error;
+        }
         if (sad < best) {
             best = sad;
             best_error = error;
@@ -2122,7 +2127,18 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
     blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
     // How far even the best match is off (average luma per pixel): high where something appears
     // or disappears that no motion explains (a text box opening, letters, a scene cut).
-    misfit.write(float4(best_error / 64.0), gid);
+    // Where the picture around is still (the top level, 32x32 pixels, has no motion: dialog,
+    // menus, a camera at rest) but this block changed and only matches somewhere else, it is
+    // content appearing or changing, not moving: text in a text box finds another letter of the
+    // text before. Such a block counts by how much it changed in place.
+    const uint2 top_id = min(gid / 4, uint2(top.get_width() - 1, top.get_height() - 1));
+    const bool around_still = length(top.read(top_id).xy) < 1.5;
+    const bool jumped = abs(best_vector.x) + abs(best_vector.y) >= 2;
+    float off = best_error;
+    if (around_still && jumped && still_error / 64.0 > 0.1) {
+        off = max(off, still_error);
+    }
+    misfit.write(float4(off / 64.0), gid);
 }
 
 /// Vector median of the 3x3 neighbourhood: the one vector of the nine that is closest to all of
@@ -2752,6 +2768,7 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:coarse_now atIndex:2];
         [encoder setTexture:fx_flow_blocks atIndex:3];
         [encoder setTexture:fx_flow_misfit atIndex:4];
+        [encoder setTexture:fx_flow_top_filtered atIndex:5];
         grid(encoder, block_width, block_height);
 
         [encoder setComputePipelineState:fx_flow_median];
