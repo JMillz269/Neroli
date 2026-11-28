@@ -520,11 +520,18 @@ bool RasterizerMetal::Draw(HardwareDraw* hw_draw) {
         !shadow_rendering &&
         (key.write_mask == static_cast<u8>(MTLColorWriteMaskNone) ||
          key.color_format == static_cast<u32>(MTLPixelFormatInvalid));
-    traits.writes_depth = has_depth && !shadow_rendering && !vertex_depth;
+    // With the W-buffer depth in the vertices only, the fragment shader writes none.
+    traits.writes_depth = has_depth && !shadow_rendering && !vertex_depth &&
+                          !(conservative_depth && GetQualityOptions().vertex_w_depth);
     traits.conservative_depth = traits.writes_depth && conservative_depth;
     traits.alpha_test =
         output_merger.alpha_test.enable.Value() != 0 &&
         output_merger.alpha_test.func.Value() != Pica::FramebufferRegs::CompareFunc::Always;
+    if (GetQualityOptions().cost_probe && !shadow_rendering &&
+        CostProbeSkips(PipelineCache::HashOf(fragment), traits.alpha_test, key.blend_enable != 0,
+                       regs.lighting.disable == 0)) {
+        return true;
+    }
     // Only the test that keeps the pixels outside the box is done in the fragment shader.
     const bool optimize = GetQualityOptions().draw_optimizations;
     traits.scissor_test =
@@ -1127,6 +1134,64 @@ void RasterizerMetal::FlushAndInvalidateRegion(PAddr addr, u32 size) {
 
 void RasterizerMetal::ClearAll(bool flush) {
     res_cache.ClearAll(flush);
+}
+
+bool RasterizerMetal::CostProbeSkips(u64 fragment_hash, bool alpha_test, bool blended, bool lit) {
+    constexpr int FIXED_PHASES = 4; // everything, alpha-tested, blended, lit
+    const auto now = std::chrono::steady_clock::now();
+    CostProbe& probe = cost_probe;
+    if (probe.phase < 0 || now - probe.start >= std::chrono::seconds{3}) {
+        if (probe.phase == 0) {
+            // The most used fragment shaders while everything was drawn, by draws.
+            probe.top.assign(probe.draws.begin(), probe.draws.end());
+            std::sort(probe.top.begin(), probe.top.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (probe.top.size() > 8) {
+                probe.top.resize(8);
+            }
+            probe.draws.clear();
+        }
+        probe.phase = probe.phase < 0
+                          ? 0
+                          : (probe.phase + 1) %
+                                (FIXED_PHASES + static_cast<int>(probe.top.size()));
+        probe.start = now;
+        switch (probe.phase) {
+        case 0:
+            LOG_INFO(Render, "GPU cost probe: drawing everything");
+            break;
+        case 1:
+            LOG_INFO(Render, "GPU cost probe: leaving out alpha-tested draws");
+            break;
+        case 2:
+            LOG_INFO(Render, "GPU cost probe: leaving out blended draws (not alpha-tested)");
+            break;
+        case 3:
+            LOG_INFO(Render, "GPU cost probe: leaving out lit draws (not alpha-tested or blended)");
+            break;
+        default: {
+            const auto& [hash, count] = probe.top[probe.phase - FIXED_PHASES];
+            LOG_INFO(Render,
+                     "GPU cost probe: leaving out fragment shader {:016x} ({} draws in 3 s with "
+                     "everything drawn)",
+                     hash, count);
+            break;
+        }
+        }
+    }
+    switch (probe.phase) {
+    case 0:
+        probe.draws[fragment_hash]++;
+        return false;
+    case 1:
+        return alpha_test;
+    case 2:
+        return blended && !alpha_test;
+    case 3:
+        return lit && !alpha_test && !blended;
+    default:
+        return fragment_hash == probe.top[probe.phase - FIXED_PHASES].first;
+    }
 }
 
 void RasterizerMetal::NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater,

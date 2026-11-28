@@ -153,6 +153,10 @@ struct QualityOptions {
     /// Keeps the MSL source of the programs and writes the most used ones to
     /// shader_dump/<title id>/ every 10 seconds or so, to study the generated code.
     bool dump_shaders = false;
+    /// Diagnostic: every 3 seconds the rasterizer leaves out another group of draws (alpha-tested,
+    /// blended, lit, then each of the most used fragment shaders) and logs which, so the GPU time
+    /// in the log shows what each costs. Things disappear from the screen while it runs.
+    bool cost_probe = false;
     /// Texture combiners in half precision.
     bool fast_color = false;
     /// Fast versions of the math functions in fragment shaders, without fast math's assumptions

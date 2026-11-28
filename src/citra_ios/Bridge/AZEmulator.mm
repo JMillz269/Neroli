@@ -720,6 +720,7 @@ const char* ThermalStateName() {
     quality.draw_optimizations = configuration.drawOptimizations;
     quality.wait_for_gpu = configuration.waitForGPU;
     quality.gpu_pass_timing = configuration.gpuPassTiming;
+    quality.cost_probe = configuration.gpuCostProbe;
     quality.dump_shaders = configuration.dumpShaders;
     quality.texture_compression = static_cast<Metal::TextureCompression>(
         std::clamp<NSInteger>(configuration.textureCompression, 0, 2));

@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <unordered_map>
+#include <vector>
+
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_metal/mtl_pipeline_cache.h"
 #include "video_core/renderer_metal/mtl_stream_buffer.h"
@@ -194,6 +198,15 @@ private:
     u32 depth_snapshot_next = 0;
 
     void NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater, bool less);
+
+    /// QualityOptions::cost_probe: whether the current phase leaves out this draw.
+    bool CostProbeSkips(u64 fragment_hash, bool alpha_test, bool blended, bool lit);
+    struct CostProbe {
+        int phase = -1;
+        std::chrono::steady_clock::time_point start{};
+        std::unordered_map<u64, u32> draws; ///< Per fragment shader, while everything is drawn
+        std::vector<std::pair<u64, u32>> top;
+    } cost_probe;
     void SnapshotDepth(const Pica::DisplayTransferConfig& config);
     /// Draws a depth buffer into an R32Float texture of any size (the whole of it).
     bool EncodeDepthCopy(id<MTLTexture> depth, id<MTLTexture> target);

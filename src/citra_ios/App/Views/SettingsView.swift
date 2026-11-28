@@ -1300,6 +1300,8 @@ struct AboutView: View {
                 Toggle("Write Log", isOn: $settings.loggingEnabled)
                 Toggle("GPU Pass Timing", isOn: $settings.gpuPassTiming)
                     .disabled(!settings.loggingEnabled)
+                Toggle("GPU Cost Breakdown", isOn: $settings.gpuCostProbe)
+                    .disabled(!settings.loggingEnabled)
                 Toggle("Save Shaders for Analysis", isOn: $settings.dumpShaders)
                 Button {
                     if let url = LogExporter.makeShareableLog() {
@@ -1315,6 +1317,7 @@ struct AboutView: View {
                     HelpList([
                         HelpItem("Share Log", "Shares the start and the end of the log and the last crash report, so the file stays small even when the full log is huge."),
                         HelpItem("Write Log", "Off, only critical errors are written and the statistics line and its counters stop, which saves a little work. Turn it on before you play a game you want a log of."),
+                        HelpItem("GPU Cost Breakdown", "A measurement for finding what makes a scene slow. While it is on, every 3 seconds the game leaves out a different group of things (see-through cut-outs, blended effects, lit objects, then each of the most used shaders one by one) and writes to the log which. Parts of the picture disappear and come back while it runs; stand still in the slow spot for about 40 seconds, then send the log. Turn it off afterwards. Needs Write Log, and GPU Pass Timing on too gives the most detail."),
                         HelpItem("GPU Pass Timing", "With Write Log on, adds the GPU time of every kind of render pass to the log. It costs GPU time and can cause stutter, so only turn it on to measure something."),
                         HelpItem("Save Shaders for Analysis", "Writes the game's most used shaders to Files › Neroli › shader_dump › (game ID) every 10 seconds or so, with an index.txt of how often each is used. Leave it off for playing."),
                         HelpItem(note: "GPU Pass Timing and Save Shaders apply when a game starts."),

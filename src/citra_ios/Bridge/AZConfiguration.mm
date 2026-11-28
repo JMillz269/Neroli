@@ -58,6 +58,7 @@
     config.antiAliasing = 0;
     config.waitForGPU = YES;
     config.gpuPassTiming = NO;
+    config.gpuCostProbe = NO;
     config.dumpShaders = NO;
     config.textureCompression = 0;
     config.fastDepthReadback = YES;

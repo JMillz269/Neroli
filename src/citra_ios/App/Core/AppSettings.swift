@@ -343,6 +343,8 @@ final class AppSettings: ObservableObject {
     @Published var waitForGPU: Bool { didSet { save(waitForGPU, "waitForGPU") } }
     /// GPU timestamps per render pass in the log (diagnostic).
     @Published var gpuPassTiming: Bool { didSet { save(gpuPassTiming, "gpuPassTiming") } }
+    /// Diagnostic: leaves out one group of draws after another, see AZConfiguration.
+    @Published var gpuCostProbe: Bool { didSet { save(gpuCostProbe, "gpuCostProbe") } }
     /// Writes the most used shaders to Neroli/shader_dump (diagnostic).
     @Published var dumpShaders: Bool { didSet { save(dumpShaders, "dumpShaders") } }
     @Published var hiddenSurfaceRemoval: Bool {
@@ -575,6 +577,7 @@ final class AppSettings: ObservableObject {
         antiAliasing = value("antiAliasing", 0)
         waitForGPU = value("waitForGPU", true)
         gpuPassTiming = value("gpuPassTiming", false)
+        gpuCostProbe = value("gpuCostProbe", false)
         dumpShaders = value("dumpShaders", false)
         textureCompression = TextureCompressionOption(rawValue: value("textureCompression", 0)) ?? .off
         anisotropy = value("anisotropy", 1)
@@ -762,6 +765,7 @@ final class AppSettings: ObservableObject {
         config.antiAliasing = antiAliasing
         config.waitForGPU = waitForGPU
         config.gpuPassTiming = gpuPassTiming
+        config.gpuCostProbe = gpuCostProbe
         config.dumpShaders = dumpShaders
         config.textureCompression = textureCompression.rawValue
         config.anisotropy = anisotropy

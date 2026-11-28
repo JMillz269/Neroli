@@ -135,6 +135,8 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL waitForGPU;
 /// GPU timestamps of every render pass for the log (diagnostic, costs GPU time).
 @property(nonatomic) BOOL gpuPassTiming;
+/// Diagnostic: leaves out one group of draws after another and logs which (QualityOptions).
+@property(nonatomic) BOOL gpuCostProbe;
 /// Writes the most used shaders of the game to Neroli/shader_dump (diagnostic).
 @property(nonatomic) BOOL dumpShaders;
 /// GPU memory compression of textures: 0 off, 1 lossless, 2 lossy (next game).
