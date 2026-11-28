@@ -2116,8 +2116,29 @@ kernel void flow_median(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(pick, 0.0, 0.0), gid);
 }
 
+/// How far the 3x3 pixels around `p` (luma in `here`) are from the previous frame moved by `v`.
+static float flow_match(texture2d<float, access::read> prev, thread const float* here, int2 p,
+                        float2 v, int2 last) {
+    const int2 shift = int2(round(v));
+    float sad = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        const int2 q = clamp(p + int2(i % 3 - 1, i / 3 - 1) + shift, int2(0), last);
+        sad += abs(here[i] - dot(prev.read(uint2(q)).rgb, kLuma));
+    }
+    return sad;
+}
+
+/// One motion vector per pixel from the vectors of the 8x8 blocks. Blending the vectors of
+/// neighbouring blocks (bilinear) gives the pixels along the outline of something that moves
+/// differently from what is behind it (a character standing still while the camera turns) vectors
+/// that belong to neither, and MetalFX drags a ghost of the background over the outline. Each
+/// pixel instead takes, of the vectors of the nine blocks around it and the blended one, the one
+/// whose move matches it best in the previous frame (3x3 pixels compared); where they match about
+/// equally well (inside a surface) the blended one, which keeps smooth motion smooth.
 kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
                         texture2d<float, access::write> motion [[texture(1)]],
+                        texture2d<float, access::read> cur [[texture(2)]],
+                        texture2d<float, access::read> prev [[texture(3)]],
                         constant uint& zero [[buffer(0)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= motion.get_width() || gid.y >= motion.get_height()) {
@@ -2127,8 +2148,29 @@ kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
     if (zero == 0) {
         constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
         const float2 size = float2(blocks.get_width(), blocks.get_height());
+        const int2 block_last = int2(blocks.get_width() - 1, blocks.get_height() - 1);
+        const int2 last = int2(cur.get_width() - 1, cur.get_height() - 1);
+        const int2 p = int2(gid);
+        float here[9];
+        for (int i = 0; i < 9; ++i) {
+            const int2 q = clamp(p + int2(i % 3 - 1, i / 3 - 1), int2(0), last);
+            here[i] = dot(cur.read(uint2(q)).rgb, kLuma);
+        }
         // Block centers are at (index + 0.5) * 8 pixels.
-        flow = blocks.sample(s, (float2(gid) + 0.5) / (size * 8.0)).xy;
+        const float2 blended = blocks.sample(s, (float2(gid) + 0.5) / (size * 8.0)).xy;
+        // The blended vector wins unless another matches clearly better.
+        float best = flow_match(prev, here, p, blended, last) - 0.08;
+        flow = blended;
+        const int2 block = p / 8;
+        for (int k = 0; k < 9; ++k) {
+            const int2 b = clamp(block + int2(k % 3 - 1, k / 3 - 1), int2(0), block_last);
+            const float2 v = blocks.read(uint2(b)).xy;
+            const float c = flow_match(prev, here, p, v, last);
+            if (c < best) {
+                best = c;
+                flow = v;
+            }
+        }
     }
     motion.write(float4(flow, 0.0, 0.0), gid);
 }
@@ -2654,6 +2696,8 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
     [encoder setComputePipelineState:fx_flow_expand];
     [encoder setTexture:fx_flow_blocks_filtered atIndex:0];
     [encoder setTexture:fx_motion atIndex:1];
+    [encoder setTexture:color atIndex:2];
+    [encoder setTexture:previous atIndex:3];
     [encoder setBytes:&zero_flag length:sizeof(zero_flag) atIndex:0];
     grid(encoder, width, height);
     [encoder endEncoding];
