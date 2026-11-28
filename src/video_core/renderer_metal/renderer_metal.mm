@@ -347,12 +347,25 @@ bool MakeScreenVertices(std::array<ScreenRectVertex, 4>& vertices,
     }
 }
 
+/// How much the frames frame generation makes are sharpened (contrast adaptive sharpening,
+/// percent). A made frame is the screens shrunk to the size of the interpolation and scaled back
+/// up, which leaves it softer than the real frames around it; the difference shows as the picture
+/// going soft and sharp at the rate of the display. It gets the sharpening the real frames get
+/// (the sharpness setting, or the Sharpen effect) and a fixed amount on top for the round trip.
+s32 MadeFrameSharpness() {
+    const int sharpness = g_sharpness.load(std::memory_order_relaxed);
+    const int base = sharpness > 0 ? sharpness
+                                   : (g_post_effect.load(std::memory_order_relaxed) == 1 ? 53 : 0);
+    return std::clamp(base + 25, 0, 100);
+}
+
 /// Draws a texture into a rectangle of the target (in pixels) with the present pipeline, without
-/// an effect and at full opacity. `width` and `height` are the size of the target.
+/// an effect and at full opacity. `width` and `height` are the size of the target. `sharpness`
+/// (percent) sharpens it with contrast adaptive sharpening.
 void EncodeRect(id<MTLRenderCommandEncoder> encoder, id<MTLRenderPipelineState> pipeline,
                 id<MTLSamplerState> sampler, id<MTLTexture> texture, f32 width, f32 height,
                 f32 x, f32 y, f32 w, f32 h, f32 u0 = 0.0f, f32 v0 = 0.0f, f32 u1 = 1.0f,
-                f32 v1 = 1.0f) {
+                f32 v1 = 1.0f, s32 sharpness = 0) {
     [encoder setRenderPipelineState:pipeline];
     [encoder setViewport:MTLViewport{0.0, 0.0, width, height, 0.0, 1.0}];
     [encoder setBlendColorRed:0.0f green:0.0f blue:0.0f alpha:1.0f];
@@ -368,6 +381,8 @@ void EncodeRect(id<MTLRenderCommandEncoder> encoder, id<MTLRenderPipelineState> 
         .fill_color = {},
         .use_fill = 0,
         .effect = 0,
+        .sharpness = sharpness,
+        .sharpen_method = sharpness > 0 ? 1 : 0,
     };
     [encoder setVertexBytes:vertices.data()
                      length:sizeof(ScreenRectVertex) * vertices.size()
@@ -2845,7 +2860,7 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
                 EncodeRect(compose, present_pipeline, present_samplers[0], made_source,
                            full_width, full_height,
                            fg_area_x, fg_area_y, fg_area_width, fg_area_height, 0.0f, 0.0f, 1.0f,
-                           1.0f);
+                           1.0f, MadeFrameSharpness());
                 [compose endEncoding];
             }
             if (!use_fx) {
@@ -2906,6 +2921,7 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
     id<MTLRenderPipelineState> ycbcr_pipeline = fg_from_ycbcr;
     id<MTLSamplerState> ycbcr_sampler = fg_sampler;
     const auto interpolate = g_fg_hooks.interpolate;
+    const s32 made_sharpness = MadeFrameSharpness();
 #if AZAHAR_HAS_METALFX
     // A VideoToolbox frame while MetalFX frame interpolation is chosen (it could not make this
     // one): its upscaler is made the first time it is needed.
@@ -2992,7 +3008,8 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
 #if AZAHAR_HAS_METALFX
             if (scaled) {
                 EncodeRect(draw, color_pipeline, color_sampler, scaler_output, width, height,
-                           area_x, area_y, area_width, area_height);
+                           area_x, area_y, area_width, area_height, 0.0f, 0.0f, 1.0f, 1.0f,
+                           made_sharpness);
             }
 #endif
             if (!scaled) {
