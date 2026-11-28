@@ -458,6 +458,17 @@ bool RasterizerMetal::Draw(HardwareDraw* hw_draw) {
     // Sync and compile the fragment shader
     const bool has_color = framebuffer->Attachment(SurfaceType::Color) != nil && !shadow_rendering;
     const bool has_depth = framebuffer->Attachment(SurfaceType::Depth) != nil && !shadow_rendering;
+    if (has_color && has_depth && write_depth_fb) {
+        using CompareFunc = Pica::FramebufferRegs::CompareFunc;
+        const CompareFunc func = output_merger.depth_test_func.Value();
+        const bool test = output_merger.depth_test_enable != 0;
+        NoteDepthDraw(framebuffer->Attachment(SurfaceType::Color),
+                      framebuffer->Attachment(SurfaceType::Depth),
+                      test && (func == CompareFunc::GreaterThan ||
+                               func == CompareFunc::GreaterThanOrEqual),
+                      test && (func == CompareFunc::LessThan ||
+                               func == CompareFunc::LessThanOrEqual));
+    }
     const auto fragment =
         pipeline_cache.UseFragmentShader(regs, user_config, has_color, has_depth);
     const bool vertex_depth = pipeline_cache.UsesVertexDepth(regs, has_depth);
@@ -1105,7 +1116,211 @@ void RasterizerMetal::ClearAll(bool flush) {
     res_cache.ClearAll(flush);
 }
 
+void RasterizerMetal::NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater,
+                                    bool less) {
+    if (!GetQualityOptions().frame_generation_depth) {
+        return;
+    }
+    DepthCandidate* slot = nullptr;
+    for (auto& candidate : depth_candidates) {
+        if (candidate.depth == depth && candidate.color == color) {
+            slot = &candidate;
+            break;
+        }
+        if (slot == nullptr && candidate.depth == nil) {
+            slot = &candidate;
+        }
+    }
+    if (slot == nullptr) {
+        return; // More than eight pairs before a transfer: the main picture is among the first
+    }
+    if (slot->depth == nil) {
+        slot->color = color;
+        slot->depth = depth;
+    }
+    slot->draws++;
+    slot->greater += greater ? 1 : 0;
+    slot->less += less ? 1 : 0;
+}
+
+namespace {
+/// Whether two sizes have the same proportions (within 1%).
+bool SameAspect(u64 width_a, u64 height_a, u64 width_b, u64 height_b) {
+    if (width_a == 0 || height_a == 0 || width_b == 0 || height_b == 0) {
+        return false;
+    }
+    const u64 a = width_a * height_b;
+    const u64 b = width_b * height_a;
+    return (a > b ? a - b : b - a) * 100 <= std::max(a, b);
+}
+} // Anonymous namespace
+
+void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
+    if (!GetQualityOptions().frame_generation_depth) {
+        return;
+    }
+    // The picture copied out is the one most draws went into since the last transfer, with the
+    // proportions of the copy.
+    const u32 in_width = config.input_width.Value();
+    const u32 in_height = config.input_height.Value();
+    const DepthCandidate* best = nullptr;
+    for (const auto& candidate : depth_candidates) {
+        if (candidate.depth == nil || candidate.draws < 4 ||
+            !SameAspect(candidate.color.width, candidate.color.height, in_width, in_height) ||
+            !SameAspect(candidate.depth.width, candidate.depth.height, candidate.color.width,
+                        candidate.color.height)) {
+            continue;
+        }
+        if (best == nullptr || candidate.draws > best->draws) {
+            best = &candidate;
+        }
+    }
+    const PAddr output = config.GetPhysicalOutputAddress();
+    if (best != nullptr) {
+        DepthSnapshot* slot = nullptr;
+        for (auto& snapshot : depth_snapshots) {
+            if (snapshot.output == output) {
+                slot = &snapshot;
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            slot = &depth_snapshots[depth_snapshot_next];
+            depth_snapshot_next = (depth_snapshot_next + 1) % depth_snapshots.size();
+        }
+        id<MTLTexture> source = best->depth;
+        if (slot->texture == nil || slot->texture.width != source.width ||
+            slot->texture.height != source.height ||
+            slot->texture.pixelFormat != source.pixelFormat) {
+            MTLTextureDescriptor* desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+                                                                   width:source.width
+                                                                  height:source.height
+                                                               mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModePrivate;
+            slot->texture = [source.device newTextureWithDescriptor:desc];
+        }
+        if (slot->texture != nil) {
+            [scheduler.BlitEncoder() copyFromTexture:source
+                                         sourceSlice:0
+                                         sourceLevel:0
+                                           toTexture:slot->texture
+                                    destinationSlice:0
+                                    destinationLevel:0
+                                          sliceCount:1
+                                          levelCount:1];
+            slot->output = output;
+            slot->aspect_width = static_cast<u32>(best->color.width);
+            slot->aspect_height = static_cast<u32>(best->color.height);
+            slot->flip = config.flip_vertically != 0;
+            slot->reversed = best->greater > best->less;
+            slot->draws = best->draws;
+        } else {
+            slot->output = 0;
+        }
+    } else {
+        // Nothing drawn with depth went into this picture (a 2D screen, a menu).
+        for (auto& snapshot : depth_snapshots) {
+            if (snapshot.output == output) {
+                snapshot.output = 0;
+            }
+        }
+    }
+    depth_candidates.fill({});
+}
+
+void RasterizerMetal::FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer_addr,
+                                      bool covers_surface) {
+    screen_info.depth = nil;
+    if (!GetQualityOptions().frame_generation_depth) {
+        return;
+    }
+    id<MTLTexture> shown = screen_info.texture;
+    id<MTLTexture> depth = nil;
+    bool flip = false;
+    bool reversed = false;
+    u32 draws = 0;
+    const char* source = "";
+    // A picture the game copied here with a display transfer: the depth saved then, when the
+    // copy is the whole picture at the same proportions (its texture coordinates are then those
+    // of the shown one).
+    for (const auto& snapshot : depth_snapshots) {
+        if (snapshot.output == framebuffer_addr && snapshot.texture != nil && covers_surface &&
+            SameAspect(snapshot.aspect_width, snapshot.aspect_height, shown.width,
+                       shown.height)) {
+            depth = snapshot.texture;
+            flip = snapshot.flip;
+            reversed = snapshot.reversed;
+            draws = snapshot.draws;
+            source = "saved at the display transfer";
+            break;
+        }
+    }
+    if (depth == nil) {
+        // The game drew right into the picture that is shown.
+        for (const auto& candidate : depth_candidates) {
+            if (candidate.color == shown && candidate.draws >= 4 && candidate.draws > draws &&
+                SameAspect(candidate.depth.width, candidate.depth.height, shown.width,
+                           shown.height)) {
+                depth = candidate.depth;
+                reversed = candidate.greater > candidate.less;
+                draws = candidate.draws;
+                source = "drawn into the shown picture";
+            }
+        }
+    }
+    if (depth != nil) {
+        screen_info.depth = depth;
+        screen_info.depth_reversed = reversed;
+        screen_info.depth_texcoords = screen_info.texcoords;
+        if (flip) {
+            // The screens are stored rotated: the texture's y is in `left` and `right` (see
+            // AccelerateDisplay).
+            screen_info.depth_texcoords.left = 1.0f - screen_info.texcoords.left;
+            screen_info.depth_texcoords.right = 1.0f - screen_info.texcoords.right;
+        }
+    }
+
+    // Logged whenever what a screen gets changes.
+    struct Logged {
+        const ScreenInfo* screen;
+        u64 signature;
+    };
+    static std::array<Logged, 3> logged{};
+    const u64 signature =
+        depth == nil ? 0
+                     : ((static_cast<u64>(depth.width) << 40) ^
+                        (static_cast<u64>(depth.height) << 20) ^ (source[0] == 's' ? 1 : 2) ^
+                        (flip ? 4 : 0) ^ (reversed ? 8 : 0) ^ (1ULL << 63));
+    for (auto& entry : logged) {
+        if (entry.screen == &screen_info || entry.screen == nullptr) {
+            if (entry.screen == nullptr || entry.signature != signature) {
+                entry.screen = &screen_info;
+                entry.signature = signature;
+                if (depth == nil) {
+                    LOG_INFO(Render,
+                             "Frame generation depth: screen {:#010x} ({}x{}) gets none (no "
+                             "picture drawn with depth matches it)",
+                             framebuffer_addr, static_cast<u32>(shown.width),
+                             static_cast<u32>(shown.height));
+                } else {
+                    LOG_INFO(Render,
+                             "Frame generation depth: screen {:#010x} gets a {}x{} depth buffer "
+                             "({}, {} draws{}), nearer is {}",
+                             framebuffer_addr, static_cast<u32>(depth.width),
+                             static_cast<u32>(depth.height), source, draws,
+                             flip ? ", flipped like the picture" : "",
+                             reversed ? "larger" : "smaller");
+                }
+            }
+            break;
+        }
+    }
+}
+
 bool RasterizerMetal::AccelerateDisplayTransfer(const Pica::DisplayTransferConfig& config) {
+    SnapshotDepth(config);
     const bool accelerated = res_cache.AccelerateDisplayTransfer(config);
     // The first transfers show whether the game's display transfers run on the GPU at all.
     static u32 logged_transfers = 0;
@@ -1161,6 +1376,11 @@ bool RasterizerMetal::AccelerateDisplay(const Pica::FramebufferConfig& config,
     screen_info.texture = src_surface.Texture();
     screen_info.width = config.width;
     screen_info.height = config.height;
+    // The depth buffer it was drawn with, for MetalFX frame interpolation. The candidates are
+    // those of this frame until the next draw.
+    FindScreenDepth(screen_info, framebuffer_addr,
+                    src_rect.GetWidth() * 10 >= scaled_width * 9 &&
+                        src_rect.GetHeight() * 10 >= scaled_height * 9);
 
     // Log what is displayed whenever it changes: a screen shown from a surface that is not at the
     // internal resolution looks blurry however it is scaled afterwards.

@@ -763,6 +763,7 @@ struct GraphicsSettingsView: View {
             HelpItem("Pause When Behind", "Shows the game's own frames, at a steady rate, only while made frames are actually being lost (several a second) and no smaller size helps, and tries frame generation again after 5 seconds."),
             HelpItem("Frame Buffer", "Keeps one more frame waiting before showing them, so a frame that comes a little late still makes its refresh: steadier (most noticeable at 120 Hz) for one refresh more input latency."),
             HelpItem("Use MetalFX Interpolation (Experimental)", "Makes the in-between frames with MetalFX's frame interpolator instead of VideoToolbox's."),
+            HelpItem("MetalFX: Game Depth (Experimental)", "Gives MetalFX the game's own depth for the top screen: how far away each pixel is. With it, MetalFX can tell what is in front of what, so things passing in front of each other and long surfaces such as stairs and floors are blended more cleanly. Neroli saves a copy of the depth when the game finishes each picture. Only with MetalFX interpolation and only for 3D scenes (2D screens and menus have no depth); with 3D side by side the screen gets none. If a game looks worse with it, turn it off for that game."),
             HelpItem("MetalFX: Optical Flow Motion (Experimental)", "MetalFX needs to know how things move between the two real frames. Without this, it gets no motion information and guesses from the colors alone, which can smear text and ghost fast objects. With it, Neroli measures the motion itself by comparing the two frames (about 1–2 ms of GPU time per frame) and hands it to MetalFX. Only with MetalFX interpolation; if the result looks worse in a game, turn it off for that game."),
             HelpItem("Top Screen Only", "Leaves the bottom screen at the game's own frame rate, which halves the work in most layouts."),
             HelpItem("Display-Driven Pacing", "Lets the display pick up each frame at its own refresh instead of timing the frames in advance (iOS 17 or later)."),
@@ -796,6 +797,9 @@ struct GraphicsSettingsView: View {
                     .disabled(settings.frameGeneration == 0)
                 Toggle("MetalFX: Optical Flow Motion (Experimental)",
                        isOn: $settings.frameGenerationFlow)
+                    .disabled(settings.frameGeneration == 0 || !settings.frameGenerationMetalFX)
+                Toggle("MetalFX: Game Depth (Experimental)",
+                       isOn: $settings.frameGenerationDepth)
                     .disabled(settings.frameGeneration == 0 || !settings.frameGenerationMetalFX)
                 Toggle("Top Screen Only", isOn: $settings.frameGenerationTopOnly)
                     .disabled(settings.frameGeneration == 0)

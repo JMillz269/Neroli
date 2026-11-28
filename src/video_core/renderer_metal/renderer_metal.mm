@@ -561,6 +561,10 @@ private:
     bool second_layer_dirty{true};
 
     id<MTLRenderPipelineState> present_pipeline = nil;
+    /// Draws a screen's depth buffer into the depth input of MetalFX frame interpolation.
+    id<MTLRenderPipelineState> depth_layout_pipeline = nil;
+    /// Whether the depth input of MetalFX holds the game's depth (else one value everywhere).
+    bool fx_depth_real = false;
     /// A post-processing shader the user wrote (see SetCustomPostShader), or nil.
     id<MTLRenderPipelineState> custom_post_pipeline = nil;
     id<MTLRenderPipelineState> present_anaglyph_pipeline = nil;
@@ -716,6 +720,7 @@ private:
     /// Motion vectors from the previous to the current real frame into fx_motion, on `buffer`.
     void EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTexture> color,
                              id<MTLTexture> previous, bool zero);
+    void EncodeFrameGenerationDepth(const Layout::FramebufferLayout& layout);
     bool EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> color, id<MTLTexture> previous,
                        id<MTLTexture> output, double delta_time);
     /// Display-driven pacing: a CAMetalDisplayLink on a thread of its own shows the frames.
@@ -782,6 +787,21 @@ void RendererMetal::CompilePresentPipelines() {
         return pipeline;
     };
     present_pipeline = make_pipeline(MTLPixelFormatBGRA8Unorm);
+    {
+        MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
+        desc.vertexFunction = [library newFunctionWithName:@"present_vs"];
+        desc.fragmentFunction = [library newFunctionWithName:@"depth_layout_fs"];
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+        NSError* depth_error = nil;
+        if (desc.fragmentFunction != nil) {
+            depth_layout_pipeline = [device newRenderPipelineStateWithDescriptor:desc
+                                                                           error:&depth_error];
+        }
+        if (depth_layout_pipeline == nil) {
+            LOG_WARNING(Render, "Frame generation depth: no pipeline ({}), MetalFX gets none",
+                        depth_error ? depth_error.localizedDescription.UTF8String : "no shader");
+        }
+    }
 
     // A shader the user wrote: their post_effect function inside a fragment function of ours.
     std::string custom_path;
@@ -2636,6 +2656,80 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
     [encoder endEncoding];
 }
 
+void RendererMetal::EncodeFrameGenerationDepth(const Layout::FramebufferLayout& layout) {
+    if (fx_depth == nil) {
+        return;
+    }
+    const bool wanted = GetQualityOptions().frame_generation_depth && depth_layout_pipeline != nil;
+    // The top screen as DrawTopScreen draws it, when it is one picture (not two side by side).
+    const ScreenInfo* screen = nullptr;
+    if (wanted && layout.top_screen_enabled) {
+        const auto mode = layout.render_3d_mode;
+        if (mode == Settings::StereoRenderOption::Off ||
+            mode == Settings::StereoRenderOption::Anaglyph ||
+            mode == Settings::StereoRenderOption::Interlaced ||
+            mode == Settings::StereoRenderOption::ReverseInterlaced) {
+            const int leftside = Settings::values.swap_eyes_3d.GetValue() ? 1 : 0;
+            const int eye = mode == Settings::StereoRenderOption::Off
+                                ? static_cast<int>(Settings::values.mono_render_option.GetValue())
+                                : leftside;
+            if (eye >= 0 && eye < 2 && screen_infos[eye].depth != nil &&
+                screen_infos[eye].texture != nil) {
+                screen = &screen_infos[eye];
+            }
+        }
+    }
+    if (screen == nullptr && !fx_depth_real) {
+        return; // Already one value everywhere
+    }
+
+    scheduler.EndEncoding();
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = fx_depth;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    // Around the top screen (borders, the bottom screen): as far as it gets. Without the game's
+    // depth: the one value MetalFX got before.
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(screen != nullptr ? 1.0 : 0.5, 0, 0, 0);
+    id<MTLRenderCommandEncoder> encoder =
+        [scheduler.CommandBuffer() renderCommandEncoderWithDescriptor:pass];
+    encoder.label = @"frame generation depth";
+    fx_depth_real = screen != nullptr;
+    if (screen != nullptr) {
+        // The interpolator's input is the area of the layout frame generation covers, scaled to
+        // its size.
+        const f32 target_w = static_cast<f32>(fx_depth.width);
+        const f32 target_h = static_cast<f32>(fx_depth.height);
+        const f32 sx = target_w / std::max(fg_area_width, 1.0f);
+        const f32 sy = target_h / std::max(fg_area_height, 1.0f);
+        const auto& rect = layout.top_screen;
+        const f32 x = (static_cast<f32>(rect.left) - fg_area_x) * sx;
+        const f32 y = (static_cast<f32>(rect.top) - fg_area_y) * sy;
+        const f32 w = static_cast<f32>(rect.GetWidth()) * sx;
+        const f32 h = static_cast<f32>(rect.GetHeight()) * sy;
+        const auto orientation = layout.is_rotated ? Layout::DisplayOrientation::Landscape
+                                                   : Layout::DisplayOrientation::Portrait;
+        std::array<ScreenRectVertex, 4> vertices;
+        if (MakeScreenVertices(vertices, screen->depth_texcoords, x, y, w, h, orientation)) {
+            const PresentUniforms uniforms = {
+                .o_resolution = {target_w, target_h, 1.0f / target_w, 1.0f / target_h},
+                .fill_color = {},
+                .use_fill = screen->depth_reversed ? 1 : 0,
+            };
+            [encoder setRenderPipelineState:depth_layout_pipeline];
+            [encoder setViewport:MTLViewport{0.0, 0.0, target_w, target_h, 0.0, 1.0}];
+            [encoder setVertexBytes:vertices.data()
+                             length:sizeof(ScreenRectVertex) * vertices.size()
+                            atIndex:0];
+            [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+            [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+            [encoder setFragmentTexture:screen->depth atIndex:0];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        }
+    }
+    [encoder endEncoding];
+}
+
 bool RendererMetal::EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> color,
                                   id<MTLTexture> previous, id<MTLTexture> output,
                                   double delta_time) {
@@ -2790,6 +2884,8 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
                 fx_queue = [instance.GetDevice() newCommandQueue];
                 fx_event = [instance.GetDevice() newEvent];
             }
+            // The game's depth, laid out like the picture the interpolator gets.
+            EncodeFrameGenerationDepth(layout);
             // The real picture is done before the interpolation starts (a signal at the end of
             // its buffer, a wait at the start of the interpolation's).
             fx_event_value++;

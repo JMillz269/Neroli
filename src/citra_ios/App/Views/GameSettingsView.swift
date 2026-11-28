@@ -118,6 +118,8 @@ struct GameSettingsView: View {
                                value: $overrides.frameGenerationMetalFX)
                 OverrideToggle("MetalFX: Optical Flow Motion (Experimental)",
                                value: $overrides.frameGenerationFlow)
+                OverrideToggle("MetalFX: Game Depth (Experimental)",
+                               value: $overrides.frameGenerationDepth)
                 OverrideToggle("Sync Speed to Display", value: $overrides.syncSpeedToDisplay)
                 OverrideToggle("Sync to Display Refresh", value: $overrides.displaySync)
                 OverridePicker("Display Refresh Rate", value: $overrides.refreshRate,

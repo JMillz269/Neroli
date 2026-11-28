@@ -31,6 +31,13 @@ struct ScreenInfo {
     Common::Rectangle<f32> texcoords{0.f, 0.f, 1.f, 1.f};
     u32 width = 0;
     u32 height = 0;
+    /// The depth buffer the game drew the screen's picture with (for MetalFX frame
+    /// interpolation), nil when it is not known. `depth_texcoords` are the screen's part of it,
+    /// like `texcoords` for the picture; `depth_reversed` when nearer things have larger values
+    /// (the game's depth test is mostly "greater").
+    id<MTLTexture> depth = nil;
+    Common::Rectangle<f32> depth_texcoords{0.f, 0.f, 1.f, 1.f};
+    bool depth_reversed = false;
 };
 
 class RasterizerMetal : public VideoCore::RasterizerAccelerated {
@@ -155,6 +162,35 @@ private:
 
     std::array<TextureBinding, 10> texture_bindings{};
     u64 bound_generation{~0ULL};
+
+    /// The depth buffers drawn with since the last display transfer (the game copying a finished
+    /// picture out), with the color buffer each was drawn with and how many draws wrote depth.
+    struct DepthCandidate {
+        id<MTLTexture> color = nil;
+        id<MTLTexture> depth = nil;
+        u32 draws = 0;
+        u32 greater = 0; ///< Draws whose depth test keeps larger values
+        u32 less = 0;    ///< Draws whose depth test keeps smaller values
+    };
+    std::array<DepthCandidate, 8> depth_candidates{};
+    /// A copy of the depth of a picture the game copied out with a display transfer, kept for
+    /// MetalFX frame interpolation (ScreenInfo::depth) until the picture is shown: by then the
+    /// game has often cleared its depth buffer for the next frame.
+    struct DepthSnapshot {
+        PAddr output = 0; ///< Where the display transfer wrote the picture
+        id<MTLTexture> texture = nil;
+        u32 aspect_width = 0; ///< The proportions of the picture it was drawn with
+        u32 aspect_height = 0;
+        bool flip = false;
+        bool reversed = false;
+        u32 draws = 0;
+    };
+    std::array<DepthSnapshot, 4> depth_snapshots{};
+    u32 depth_snapshot_next = 0;
+
+    void NoteDepthDraw(id<MTLTexture> color, id<MTLTexture> depth, bool greater, bool less);
+    void SnapshotDepth(const Pica::DisplayTransferConfig& config);
+    void FindScreenDepth(ScreenInfo& screen_info, PAddr framebuffer_addr, bool covers_surface);
 };
 
 } // namespace Metal

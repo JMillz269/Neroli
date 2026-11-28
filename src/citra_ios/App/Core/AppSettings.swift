@@ -300,6 +300,10 @@ final class AppSettings: ObservableObject {
     /// Make the frames with MetalFX's interpolator instead of VideoToolbox's.
     /// MetalFX interpolation with motion vectors from an optical flow pass.
     @Published var frameGenerationFlow: Bool { didSet { save(frameGenerationFlow, "frameGenerationFlow") } }
+    /// MetalFX interpolation with the game's depth buffer of the top screen.
+    @Published var frameGenerationDepth: Bool {
+        didSet { save(frameGenerationDepth, "frameGenerationDepth") }
+    }
     @Published var frameGenerationMetalFX: Bool {
         didSet { save(frameGenerationMetalFX, "frameGenerationMetalFX") }
     }
@@ -541,6 +545,7 @@ final class AppSettings: ObservableObject {
         frameGenerationDisplayPaced = value("frameGenerationDisplayPaced", false)
         frameGenerationMetalFX = value("frameGenerationMetalFX", false)
         frameGenerationFlow = value("frameGenerationFlow", false)
+        frameGenerationDepth = value("frameGenerationDepth", false)
         frameGenerationAllGames = value("frameGenerationAllGames", false)
         shaderWaitMs = value("shaderWaitMs", 2)
         fastShaderMath = value("fastShaderMath", true)
@@ -714,6 +719,7 @@ final class AppSettings: ObservableObject {
         config.frameGenerationDisplayPaced = frameGenerationDisplayPaced
         config.frameGenerationMetalFX = frameGenerationMetalFX
         config.frameGenerationFlow = frameGenerationFlow
+        config.frameGenerationDepth = frameGenerationDepth
         // The rate the display really runs at: the one chosen in the settings (never above what the
         // screen can do), or the fastest the screen can do with Automatic. The renderer paces
         // frames to its refreshes and decides from it whether 60 FPS games can be interpolated.

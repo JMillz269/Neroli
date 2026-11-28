@@ -87,6 +87,8 @@ typedef NS_ENUM(NSInteger, AZPortraitLayoutOption) {
 @property(nonatomic) BOOL frameGenerationMetalFX;
 /// With MetalFX interpolation: motion vectors from an optical flow pass over the two real frames.
 @property(nonatomic) BOOL frameGenerationFlow;
+/// With MetalFX interpolation: the game's depth buffer of the top screen as its depth input.
+@property(nonatomic) BOOL frameGenerationDepth;
 /// Highest refresh rate of the display (UIScreen.maximumFramesPerSecond).
 @property(nonatomic) NSInteger displayRefreshRate;
 /// Milliseconds a draw waits for its shader to build before it is skipped (0 never waits).

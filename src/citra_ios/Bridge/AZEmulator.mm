@@ -741,6 +741,7 @@ const char* ThermalStateName() {
         configuration.displaySync ? &Metal::SnapDeadlineToDisplay : nullptr);
     quality.frame_generation_metalfx = configuration.frameGenerationMetalFX;
     quality.frame_generation_flow = configuration.frameGenerationFlow;
+    quality.frame_generation_depth = configuration.frameGenerationDepth;
     quality.shader_wait_us = static_cast<u32>(std::clamp<NSInteger>(configuration.shaderWaitMs, 0, 16)) * 1000;
     quality.max_anisotropy = static_cast<int>(configuration.anisotropy);
     Metal::SetQualityOptions(quality);

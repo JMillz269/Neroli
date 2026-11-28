@@ -368,6 +368,16 @@ fragment float4 present_interlaced_fs(PresentVOut in [[stage_in]],
                        : right.sample(s, in.tex_coord).rgb;
     return float4(color, 1.0f);
 }
+
+// The game's depth buffer of a screen drawn into the depth input of MetalFX frame interpolation
+// (R32Float), with the screen's own vertices. MetalFX gets "nearer is smaller": a game whose
+// depth test keeps larger values (use_fill set here) has it turned around.
+fragment float depth_layout_fs(PresentVOut in [[stage_in]], depth2d<float> depth [[texture(0)]],
+                               constant PresentUniforms& u [[buffer(1)]]) {
+    constexpr sampler nearest_sampler(filter::nearest, address::clamp_to_edge);
+    const float d = depth.sample(nearest_sampler, in.tex_coord);
+    return u.use_fill != 0 ? 1.0f - d : d;
+}
 )";
 
 
