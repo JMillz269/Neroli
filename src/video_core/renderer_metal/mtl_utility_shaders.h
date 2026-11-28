@@ -369,6 +369,30 @@ fragment float4 present_interlaced_fs(PresentVOut in [[stage_in]],
     return float4(color, 1.0f);
 }
 
+// Frame generation: the real frame over the made one where no motion explains the change between
+// the two real frames (MetalFX would morph one into the other there). The texture coordinates are
+// those of the area in the made frame; fill_color holds the area's place in the real picture
+// (x, y, width, height, as texture coordinates). The misfit texture has one value per 8x8 block:
+// the average luma difference of its best match.
+fragment float4 made_fallback_fs(PresentVOut in [[stage_in]], texture2d<float> real [[texture(0)]],
+                                 texture2d<float> misfit [[texture(1)]],
+                                 constant PresentUniforms& u [[buffer(1)]]) {
+    constexpr sampler linear_sampler(filter::linear, address::clamp_to_edge);
+    const float2 step = 1.0f / float2(misfit.get_width(), misfit.get_height());
+    float m = 0.0f;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            m = max(m, misfit.sample(linear_sampler, in.tex_coord + float2(x, y) * step).r);
+        }
+    }
+    const float show = smoothstep(0.08f, 0.18f, m);
+    if (show <= 0.0f) {
+        discard_fragment();
+    }
+    const float2 uv = u.fill_color.xy + in.tex_coord * u.fill_color.zw;
+    return float4(real.sample(linear_sampler, uv).rgb, show);
+}
+
 // The game's depth buffer of a screen drawn into the depth input of MetalFX frame interpolation
 // (R32Float), with the screen's own vertices. MetalFX gets "nearer is smaller": a game whose
 // depth test keeps larger values (use_fill set here) has it turned around.

@@ -700,6 +700,11 @@ private:
     id<MTLComputePipelineState> fx_flow_top = nil;
     id<MTLTexture> fx_flow_coarse_tex = nil;
     id<MTLTexture> fx_flow_blocks = nil;
+    /// Per 8x8 block, how far the best match is off (flow_refine), and whether it is this frame's.
+    id<MTLTexture> fx_flow_misfit = nil;
+    bool fx_misfit_valid = false;
+    /// Draws the real frame over the made one where no motion explains the change.
+    id<MTLRenderPipelineState> made_fallback_pipeline = nil;
     bool fx_flow_failed{false};
     u32 fx_flow_frames{};
     /// The interpolation runs on a queue of its own, after the real picture (an event), so the
@@ -792,6 +797,31 @@ void RendererMetal::CompilePresentPipelines() {
         return pipeline;
     };
     present_pipeline = make_pipeline(MTLPixelFormatBGRA8Unorm);
+    {
+        // Like the present pipeline, but blended by the alpha the shader gives each pixel.
+        MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
+        desc.vertexFunction = [library newFunctionWithName:@"present_vs"];
+        desc.fragmentFunction = [library newFunctionWithName:@"made_fallback_fs"];
+        MTLRenderPipelineColorAttachmentDescriptor* color = desc.colorAttachments[0];
+        color.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        color.blendingEnabled = YES;
+        color.rgbBlendOperation = MTLBlendOperationAdd;
+        color.alphaBlendOperation = MTLBlendOperationAdd;
+        color.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        color.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        color.sourceAlphaBlendFactor = MTLBlendFactorZero;
+        color.destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError* fallback_error = nil;
+        if (desc.fragmentFunction != nil) {
+            made_fallback_pipeline = [device newRenderPipelineStateWithDescriptor:desc
+                                                                            error:&fallback_error];
+        }
+        if (made_fallback_pipeline == nil) {
+            LOG_WARNING(Render, "Frame generation: no fallback pipeline ({})",
+                        fallback_error ? fallback_error.localizedDescription.UTF8String
+                                       : "no shader");
+        }
+    }
     {
         MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
         desc.vertexFunction = [library newFunctionWithName:@"present_vs"];
@@ -2055,6 +2085,7 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
                         texture2d<float, access::read> prev [[texture(1)]],
                         texture2d<float, access::read> coarse [[texture(2)]],
                         texture2d<float, access::write> blocks [[texture(3)]],
+                        texture2d<float, access::write> misfit [[texture(4)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= blocks.get_width() || gid.y >= blocks.get_height()) {
         return;
@@ -2068,6 +2099,7 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
         block[i] = dot(cur.read(uint2(min(origin + int2(i & 7, i >> 3), size - 1))).rgb, kLuma);
     }
     float best = 1e9;
+    float best_error = 0.0;
     int2 best_vector = int2(0);
     // Around the coarse vector, and no motion at all.
     for (int k = -1; k < 25; ++k) {
@@ -2082,10 +2114,14 @@ kernel void flow_refine(texture2d<float, access::read> cur [[texture(0)]],
         const float sad = error + 0.02 * float(abs(v.x - center.x) + abs(v.y - center.y));
         if (sad < best) {
             best = sad;
+            best_error = error;
             best_vector = v;
         }
     }
     blocks.write(float4(float2(best_vector), 0.0, 0.0), gid);
+    // How far even the best match is off (average luma per pixel): high where something appears
+    // or disappears that no motion explains (a text box opening, letters, a scene cut).
+    misfit.write(float4(best_error / 64.0), gid);
 }
 
 /// Vector median of the 3x3 neighbourhood: the one vector of the nine that is closest to all of
@@ -2378,6 +2414,8 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_flow_top_filtered = nil;
     fx_flow_coarse_tex = nil;
     fx_flow_blocks = nil;
+    fx_flow_misfit = nil;
+    fx_misfit_valid = false;
     fx_flow_coarse_filtered = {};
     fx_flow_blocks_filtered = nil;
     fx_small_color = {};
@@ -2612,12 +2650,14 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_top_filtered = make_texture(MTLPixelFormatRG16Float, top_width, top_height);
         fx_flow_coarse_tex = make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
+        fx_flow_misfit = make_texture(MTLPixelFormatR16Float, block_width, block_height);
         fx_flow_coarse_filtered[0] =
             make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_coarse_filtered[1] =
             make_texture(MTLPixelFormatRG16Float, coarse_width, coarse_height);
         fx_flow_blocks_filtered = make_texture(MTLPixelFormatRG16Float, block_width, block_height);
-        if (fx_luma[0] == nil || fx_luma[1] == nil || fx_luma16[0] == nil ||
+        if (fx_flow_misfit == nil || fx_luma[0] == nil || fx_luma[1] == nil ||
+            fx_luma16[0] == nil ||
             fx_luma16[1] == nil || fx_flow_top_tex == nil || fx_flow_top_filtered == nil ||
             fx_flow_coarse_tex == nil ||
             fx_flow_blocks == nil || fx_flow_coarse_filtered[0] == nil ||
@@ -2687,6 +2727,7 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:previous atIndex:1];
         [encoder setTexture:coarse_now atIndex:2];
         [encoder setTexture:fx_flow_blocks atIndex:3];
+        [encoder setTexture:fx_flow_misfit atIndex:4];
         grid(encoder, block_width, block_height);
 
         [encoder setComputePipelineState:fx_flow_median];
@@ -2694,6 +2735,7 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         [encoder setTexture:fx_flow_blocks_filtered atIndex:1];
         grid(encoder, block_width, block_height);
     }
+    fx_misfit_valid = !zero;
     const u32 zero_flag = zero ? 1u : 0u;
     [encoder setComputePipelineState:fx_flow_expand];
     [encoder setTexture:fx_flow_blocks_filtered atIndex:0];
@@ -3016,6 +3058,37 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
                            full_width, full_height,
                            fg_area_x, fg_area_y, fg_area_width, fg_area_height, 0.0f, 0.0f, 1.0f,
                            1.0f, MadeFrameSharpness());
+                // Where no motion explains what changed between the two real frames (a text box
+                // opening or closing, letters appearing, a cut), MetalFX morphs one picture into
+                // the other and shows scrambled halves. The newer real frame goes over those
+                // places instead, faded in by how far off the best match was.
+                if (fx_misfit_valid && fx_flow_misfit != nil && made_fallback_pipeline != nil) {
+                    const std::array<ScreenRectVertex, 4> vertices{{
+                        ScreenRectVertex(fg_area_x, fg_area_y, 0.0f, 0.0f),
+                        ScreenRectVertex(fg_area_x + fg_area_width, fg_area_y, 1.0f, 0.0f),
+                        ScreenRectVertex(fg_area_x, fg_area_y + fg_area_height, 0.0f, 1.0f),
+                        ScreenRectVertex(fg_area_x + fg_area_width, fg_area_y + fg_area_height,
+                                         1.0f, 1.0f),
+                    }};
+                    // fill_color: the area in the real picture (its texture coordinates).
+                    const PresentUniforms uniforms = {
+                        .o_resolution = {full_width, full_height, 1.0f / full_width,
+                                         1.0f / full_height},
+                        .fill_color = {fg_area_x / full_width, fg_area_y / full_height,
+                                       fg_area_width / full_width, fg_area_height / full_height},
+                    };
+                    [compose setRenderPipelineState:made_fallback_pipeline];
+                    [compose setViewport:MTLViewport{0.0, 0.0, full_width, full_height, 0.0, 1.0}];
+                    [compose setVertexBytes:vertices.data()
+                                     length:sizeof(ScreenRectVertex) * vertices.size()
+                                    atIndex:0];
+                    [compose setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+                    [compose setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+                    [compose setFragmentTexture:current atIndex:0];
+                    [compose setFragmentTexture:fx_flow_misfit atIndex:1];
+                    [compose drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0
+                                vertexCount:4];
+                }
                 [compose endEncoding];
             }
             if (!use_fx) {
