@@ -664,6 +664,11 @@ private:
     id<MTLComputePipelineState> fx_flow_refine = nil;
     id<MTLComputePipelineState> fx_flow_expand = nil;
     id<MTLComputePipelineState> fx_flow_median = nil;
+    id<MTLComputePipelineState> fx_flow_guard = nil;
+    /// The made frame after the check against the real frames (flow_guard), at the size of the
+    /// interpolation; `fx_result` is it when the check ran this frame, else nil.
+    id<MTLTexture> fx_guard_out = nil;
+    id<MTLTexture> fx_result = nil;
     /// The cleaned coarse vectors of this frame and the last one (a prediction for this one).
     std::array<id<MTLTexture>, 2> fx_flow_coarse_filtered{};
     u32 fx_flow_coarse_index = 0;
@@ -2078,6 +2083,41 @@ kernel void flow_median(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(pick, 0.0, 0.0), gid);
 }
 
+/// Checks the frame MetalFX made against the two real frames around it. Every pixel of a correct
+/// in-between frame is found in the previous frame half a motion vector one way, or in the next
+/// one half a vector the other way (or close by). A pixel found in neither is MetalFX's own guess
+/// gone wrong (torn patches of repeating textures such as stairs): it is replaced by the two real
+/// frames blended along the motion, fading in with how wrong it is so there is no hard edge.
+kernel void flow_guard(texture2d<float, access::sample> made [[texture(0)]],
+                       texture2d<float, access::sample> prev [[texture(1)]],
+                       texture2d<float, access::sample> cur [[texture(2)]],
+                       texture2d<float, access::sample> motion [[texture(3)]],
+                       texture2d<float, access::write> out [[texture(4)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
+        return;
+    }
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::pixel);
+    const float2 p = float2(gid) + 0.5;
+    const float2 half_v = motion.sample(s, p).xy * 0.5;
+    const float3 g = made.sample(s, p).rgb;
+    float d_prev = 1e9;
+    float d_cur = 1e9;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const float2 o = float2(x, y);
+            const float3 a = abs(g - prev.sample(s, p + half_v + o).rgb);
+            const float3 b = abs(g - cur.sample(s, p - half_v + o).rgb);
+            d_prev = min(d_prev, a.r + a.g + a.b);
+            d_cur = min(d_cur, b.r + b.g + b.b);
+        }
+    }
+    const float wrong = smoothstep(0.15, 0.4, min(d_prev, d_cur));
+    const float3 fallback =
+        0.5 * (prev.sample(s, p + half_v).rgb + cur.sample(s, p - half_v).rgb);
+    out.write(float4(mix(g, fallback, wrong), 1.0), gid);
+}
+
 kernel void flow_expand(texture2d<float, access::sample> blocks [[texture(0)]],
                         texture2d<float, access::write> motion [[texture(1)]],
                         constant uint& zero [[buffer(0)]],
@@ -2298,6 +2338,8 @@ bool RendererMetal::PrepareMetalFX(u32 layout_width, u32 layout_height, f32 area
     fx_flow_blocks = nil;
     fx_flow_coarse_filtered = {};
     fx_flow_blocks_filtered = nil;
+    fx_guard_out = nil;
+    fx_result = nil;
     fx_small_color = {};
     fx_small_out = nil;
     fx_full_out = nil;
@@ -2490,7 +2532,9 @@ void RendererMetal::EncodeMotionVectors(id<MTLCommandBuffer> buffer, id<MTLTextu
         fx_flow_median = make(@"flow_median");
         fx_flow_down_luma = make(@"flow_down_luma");
         fx_flow_top = make(@"flow_top");
-        if (fx_flow_down_luma == nil || fx_flow_top == nil || fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
+        fx_flow_guard = make(@"flow_guard");
+        if (fx_flow_guard == nil || fx_flow_down_luma == nil || fx_flow_top == nil ||
+            fx_flow_down == nil || fx_flow_coarse == nil || fx_flow_refine == nil ||
             fx_flow_expand == nil || fx_flow_median == nil) {
             LOG_ERROR(Render, "Optical flow shaders failed: {}; MetalFX gets no motion vectors",
                       error ? error.localizedDescription.UTF8String : "unknown error");
@@ -2690,6 +2734,37 @@ bool RendererMetal::EncodeMetalFX(id<MTLCommandBuffer> buffer, id<MTLTexture> co
         return false;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(fx_interpolator, encode, buffer);
+    fx_result = nil;
+    if (GetQualityOptions().frame_generation_flow && !fx_flow_failed && !fx_reset &&
+        fx_flow_guard != nil) {
+        id<MTLDevice> device = instance.GetDevice();
+        if (fx_guard_out == nil || fx_guard_out.width != output.width ||
+            fx_guard_out.height != output.height) {
+            MTLTextureDescriptor* desc = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:output.pixelFormat
+                                             width:output.width
+                                            height:output.height
+                                         mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
+                         MTLTextureUsageRenderTarget;
+            desc.storageMode = MTLStorageModePrivate;
+            fx_guard_out = [device newTextureWithDescriptor:desc];
+        }
+        if (fx_guard_out != nil) {
+            id<MTLComputeCommandEncoder> guard = [buffer computeCommandEncoder];
+            guard.label = @"frame generation check";
+            [guard setComputePipelineState:fx_flow_guard];
+            [guard setTexture:output atIndex:0];
+            [guard setTexture:frame_previous atIndex:1];
+            [guard setTexture:frame_color atIndex:2];
+            [guard setTexture:fx_motion atIndex:3];
+            [guard setTexture:fx_guard_out atIndex:4];
+            [guard dispatchThreads:MTLSizeMake(output.width, output.height, 1)
+             threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [guard endEncoding];
+            fx_result = fx_guard_out;
+        }
+    }
     fx_reset = false;
     return true;
 }
@@ -2813,12 +2888,13 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
             }
             const double delta = std::clamp(fg_interval, 0.012, 0.1);
             use_fx = EncodeMetalFX(fx_buffer, in_current, in_previous, out, delta);
-            id<MTLTexture> made_source = shrink ? fx_small_out : fx_full_out;
+            id<MTLTexture> made_source =
+                use_fx && fx_result != nil ? fx_result : (shrink ? fx_small_out : fx_full_out);
 #if AZAHAR_HAS_METALFX
             if (use_fx && shrink && fx_upscale.scaler != nil) {
                 // The small made frame scaled up to its area with MetalFX.
                 id<MTLBlitCommandEncoder> copy = [fx_buffer blitCommandEncoder];
-                [copy copyFromTexture:fx_small_out toTexture:fx_upscale.input];
+                [copy copyFromTexture:made_source toTexture:fx_upscale.input];
                 [copy endEncoding];
                 fx_upscale.scaler.colorTexture = fx_upscale.input;
                 fx_upscale.scaler.outputTexture = fx_upscale.output;
