@@ -178,6 +178,7 @@ private:
     /// game has often cleared its depth buffer for the next frame.
     struct DepthSnapshot {
         PAddr output = 0; ///< Where the display transfer wrote the picture
+        PAddr input = 0;  ///< Where it read it from
         id<MTLTexture> texture = nil;
         u32 out_width = 0; ///< The size of the picture the transfer wrote (before upscaling)
         u32 out_height = 0;

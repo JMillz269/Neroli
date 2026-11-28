@@ -565,6 +565,9 @@ private:
     id<MTLRenderPipelineState> depth_layout_pipeline = nil;
     /// Whether the depth input of MetalFX holds the game's depth (else one value everywhere).
     bool fx_depth_real = false;
+    /// Made frames with and without the game's depth since the last log line.
+    u32 fx_depth_with = 0;
+    u32 fx_depth_without = 0;
     /// A post-processing shader the user wrote (see SetCustomPostShader), or nil.
     id<MTLRenderPipelineState> custom_post_pipeline = nil;
     id<MTLRenderPipelineState> present_anaglyph_pipeline = nil;
@@ -2677,6 +2680,15 @@ void RendererMetal::EncodeFrameGenerationDepth(const Layout::FramebufferLayout& 
                 screen_infos[eye].texture != nil) {
                 screen = &screen_infos[eye];
             }
+        }
+    }
+    if (wanted) {
+        (screen != nullptr ? fx_depth_with : fx_depth_without)++;
+        if (fx_depth_with + fx_depth_without >= 300) {
+            LOG_INFO(Render, "Frame generation depth: {} of the last {} interpolated frames had the "
+                             "game's depth",
+                     fx_depth_with, fx_depth_with + fx_depth_without);
+            fx_depth_with = fx_depth_without = 0;
         }
     }
     if (screen == nullptr && !fx_depth_real) {

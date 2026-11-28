@@ -1176,7 +1176,19 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
         }
     }
     const PAddr output = config.GetPhysicalOutputAddress();
-    if (best != nullptr) {
+    const PAddr input = config.GetPhysicalInputAddress();
+    // A picture copied out again without a draw in between (Dragon Quest VIII copies each frame
+    // to two framebuffers): the depth saved at the first copy is its depth too.
+    const DepthSnapshot* again = nullptr;
+    if (best == nullptr) {
+        for (const auto& snapshot : depth_snapshots) {
+            if (snapshot.output != 0 && snapshot.input == input && snapshot.texture != nil) {
+                again = &snapshot;
+                break;
+            }
+        }
+    }
+    if (best != nullptr || again != nullptr) {
         DepthSnapshot* slot = nullptr;
         for (auto& snapshot : depth_snapshots) {
             if (snapshot.output == output) {
@@ -1185,10 +1197,21 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
             }
         }
         if (slot == nullptr) {
-            slot = &depth_snapshots[depth_snapshot_next];
-            depth_snapshot_next = (depth_snapshot_next + 1) % depth_snapshots.size();
+            // A slot that is not the one copied from.
+            for (std::size_t i = 0; i < depth_snapshots.size(); ++i) {
+                DepthSnapshot* next = &depth_snapshots[depth_snapshot_next];
+                depth_snapshot_next = (depth_snapshot_next + 1) % depth_snapshots.size();
+                if (next != again) {
+                    slot = next;
+                    break;
+                }
+            }
         }
-        id<MTLTexture> source = best->depth;
+        if (slot == again) {
+            depth_candidates.fill({});
+            return; // The copy goes where the picture already was: its depth is there
+        }
+        id<MTLTexture> source = best != nullptr ? best->depth : again->texture;
         if (slot->texture == nil || slot->texture.width != source.width ||
             slot->texture.height != source.height ||
             slot->texture.pixelFormat != source.pixelFormat) {
@@ -1210,30 +1233,43 @@ void RasterizerMetal::SnapshotDepth(const Pica::DisplayTransferConfig& config) {
                                     destinationLevel:0
                                           sliceCount:1
                                           levelCount:1];
+            if (best != nullptr) {
+                // The transfer reads output_width x output_height pixels of rows input_width
+                // wide (input_height of them in the buffer) and writes them halved in width
+                // (ScaleX) or in both (ScaleXY), as the cache does
+                // (RasterizerCache::AccelerateDisplayTransfer).
+                const u32 out_width = config.output_width.Value();
+                const u32 out_height = config.output_height.Value();
+                slot->out_width = config.scaling != config.NoScale ? out_width / 2 : out_width;
+                slot->out_height = config.scaling == config.ScaleXY ? out_height / 2 : out_height;
+                slot->part_x = in_width > 0 ? std::min(1.0f, static_cast<f32>(out_width) /
+                                                                 static_cast<f32>(in_width))
+                                            : 1.0f;
+                slot->part_y = in_height > 0 ? std::min(1.0f, static_cast<f32>(out_height) /
+                                                                  static_cast<f32>(in_height))
+                                             : 1.0f;
+                // The cache flips the picture when it copies between a tiled and a linear
+                // surface (their rows run in opposite directions in its textures), and again
+                // for the transfer's own flip (RasterizerCache::AccelerateDisplayTransfer). A
+                // render target copied to a linear framebuffer without the flip flag is upside
+                // down relative to its depth buffer.
+                const bool src_tiled = !config.input_linear;
+                const bool dst_tiled = config.input_linear != config.dont_swizzle;
+                slot->flip = (src_tiled != dst_tiled) != (config.flip_vertically != 0);
+                slot->reversed = best->greater > best->less;
+                slot->draws = best->draws;
+            } else {
+                const DepthSnapshot copy = *again;
+                slot->out_width = copy.out_width;
+                slot->out_height = copy.out_height;
+                slot->part_x = copy.part_x;
+                slot->part_y = copy.part_y;
+                slot->flip = copy.flip;
+                slot->reversed = copy.reversed;
+                slot->draws = copy.draws;
+            }
             slot->output = output;
-            // The transfer reads output_width x output_height pixels of rows input_width wide
-            // (input_height of them in the buffer) and writes them halved in width (ScaleX) or
-            // in both (ScaleXY), as the cache does (RasterizerCache::AccelerateDisplayTransfer).
-            const u32 out_width = config.output_width.Value();
-            const u32 out_height = config.output_height.Value();
-            slot->out_width = config.scaling != config.NoScale ? out_width / 2 : out_width;
-            slot->out_height = config.scaling == config.ScaleXY ? out_height / 2 : out_height;
-            slot->part_x = in_width > 0 ? std::min(1.0f, static_cast<f32>(out_width) /
-                                                             static_cast<f32>(in_width))
-                                        : 1.0f;
-            slot->part_y = in_height > 0 ? std::min(1.0f, static_cast<f32>(out_height) /
-                                                              static_cast<f32>(in_height))
-                                         : 1.0f;
-            // The cache flips the picture when it copies between a tiled and a linear surface
-            // (their rows run in opposite directions in its textures), and again for the
-            // transfer's own flip (RasterizerCache::AccelerateDisplayTransfer). A render target
-            // copied to a linear framebuffer without the flip flag is upside down relative to
-            // its depth buffer.
-            const bool src_tiled = !config.input_linear;
-            const bool dst_tiled = config.input_linear != config.dont_swizzle;
-            slot->flip = (src_tiled != dst_tiled) != (config.flip_vertically != 0);
-            slot->reversed = best->greater > best->less;
-            slot->draws = best->draws;
+            slot->input = input;
         } else {
             slot->output = 0;
         }
