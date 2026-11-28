@@ -1521,6 +1521,13 @@ Sampler::Sampler(TextureRuntime& runtime, const VideoCore::SamplerParams& params
                        : 1;
 
     sampler = [runtime.GetInstance().GetDevice() newSamplerStateWithDescriptor:desc];
+    if (desc.maxAnisotropy > 1) {
+        desc.maxAnisotropy = 1;
+        cutout = [runtime.GetInstance().GetDevice() newSamplerStateWithDescriptor:desc];
+    }
+    if (cutout == nil) {
+        cutout = sampler;
+    }
 }
 
 Sampler::~Sampler() = default;

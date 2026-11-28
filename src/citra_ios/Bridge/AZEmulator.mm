@@ -746,6 +746,12 @@ const char* ThermalStateName() {
     quality.shader_wait_us = static_cast<u32>(std::clamp<NSInteger>(configuration.shaderWaitMs, 0, 16)) * 1000;
     quality.max_anisotropy = static_cast<int>(configuration.anisotropy);
     Metal::SetQualityOptions(quality);
+    LOG_INFO(Frontend,
+             "Graphics: resolution {}x, MSAA setting {}, anisotropic filtering {}x (not for "
+             "alpha-tested draws), hidden surface removal {}, early pixel discard {}, fast "
+             "W-buffer depth {}",
+             configuration.resolutionFactor, configuration.antiAliasing, quality.max_anisotropy,
+             quality.vertex_depth, quality.early_discard, configuration.fastWBufferDepth);
     // Camera slots: 0 outer right, 1 inner, 2 outer left.
     const auto set_camera = [&](std::size_t slot, NSInteger choice) {
         values.camera_name[slot] = choice == 0 ? "blank" : Camera::IOS_CAMERA_NAME;

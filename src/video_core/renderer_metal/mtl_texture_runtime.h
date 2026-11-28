@@ -485,8 +485,15 @@ public:
         return sampler;
     }
 
+    /// The same sampler without anisotropic filtering (the same one when it has none), for
+    /// alpha-tested draws: see RasterizerMetal::SyncTextureUnits.
+    [[nodiscard]] id<MTLSamplerState> CutoutHandle() const noexcept {
+        return cutout;
+    }
+
 private:
     id<MTLSamplerState> sampler;
+    id<MTLSamplerState> cutout;
 };
 
 class DebugScope {

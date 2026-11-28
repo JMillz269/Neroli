@@ -827,6 +827,19 @@ void RasterizerMetal::SyncTextureUnits(const Framebuffer& framebuffer) {
     id<MTLSamplerState> null_sampler = res_cache.GetSampler(VideoCore::NULL_SAMPLER_ID).Handle();
     id<MTLTexture> color_attachment = framebuffer.Attachment(SurfaceType::Color);
 
+    // Alpha-tested draws (grass, leaves, fences, hair) sample without anisotropic filtering. They
+    // are cut-outs: most of what anisotropic filtering samples extra lands on pixels the test
+    // throws away, and on their hard edges it shows little. It is what makes them expensive where
+    // they are seen at a grazing angle in layers: Dragon Quest VIII draws its ground grass as
+    // about 20 alpha-tested layers over the whole ground, which took 10 ms a frame at 2x with
+    // 16x anisotropic filtering.
+    const auto& alpha_test = regs.framebuffer.output_merger.alpha_test;
+    const bool cutout = alpha_test.enable != 0 &&
+                        alpha_test.func.Value() != Pica::FramebufferRegs::CompareFunc::Always;
+    const auto handle = [cutout](Sampler& sampler) {
+        return cutout ? sampler.CutoutHandle() : sampler.Handle();
+    };
+
     texture_bindings = {};
 
     const auto bind_2d = [&](u32 slot, const Pica::TexturingRegs::FullTextureConfig& texture) {
@@ -843,7 +856,7 @@ void RasterizerMetal::SyncTextureUnits(const Framebuffer& framebuffer) {
             // Sampling the render target being drawn to is undefined, sample a copy instead.
             view = surface.CopyTexture();
         }
-        texture_bindings[slot] = {view, sampler.Handle()};
+        texture_bindings[slot] = {view, handle(sampler)};
     };
 
     switch (texture0_type) {
