@@ -354,11 +354,12 @@ bool MakeScreenVertices(std::array<ScreenRectVertex, 4>& vertices,
 /// up, which leaves it softer than the real frames around it; the difference shows as the picture
 /// going soft and sharp at the rate of the display. It gets the sharpening the real frames get
 /// (the sharpness setting, or the Sharpen effect) and a fixed amount on top for the round trip.
-s32 MadeFrameSharpness() {
+s32 MadeFrameSharpness(bool videotoolbox = false) {
     const int sharpness = g_sharpness.load(std::memory_order_relaxed);
     const int base = sharpness > 0 ? sharpness
                                    : (g_post_effect.load(std::memory_order_relaxed) == 1 ? 53 : 0);
-    return std::clamp(base + 25, 0, 100);
+    // VideoToolbox's frames are softer still: their color is stored at a quarter of the size.
+    return std::clamp(base + (videotoolbox ? 45 : 25), 0, 100);
 }
 
 /// Draws a texture into a rectangle of the target (in pixels) with the present pipeline, without
@@ -2270,8 +2271,31 @@ fragment float4 from_ycbcr(FullscreenOut in [[stage_in]],
                            texture2d<float> luma [[texture(0)]],
                            texture2d<float> chroma [[texture(1)]],
                            sampler s [[sampler(0)]]) {
-    const float y = (luma.sample(s, in.uv).r * 255.0 - 16.0) / 219.0;
-    const float2 c = (chroma.sample(s, in.uv).rg * 255.0 - 128.0) / 224.0;
+    const float luma_here = luma.sample(s, in.uv).r;
+    const float y = (luma_here * 255.0 - 16.0) / 219.0;
+    // The color is stored at half the size (4:2:0). Plain filtering blends it across edges (a
+    // red bandana bleeds into the wall behind it); each of the four nearest color samples counts
+    // here by how close the brightness at its place is to the brightness here, so the color
+    // follows the edges of the brightness, which is stored at the full size.
+    constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
+    const float2 chroma_size = float2(chroma.get_width(), chroma.get_height());
+    const float2 pos = in.uv * chroma_size - 0.5;
+    const float2 base = floor(pos);
+    const float2 f = pos - base;
+    float2 sum = float2(0.0);
+    float weight = 0.0;
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const float2 uv = (base + float2(i, j) + 0.5) / chroma_size;
+            const float bilinear = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            // The brightness of the 2x2 pixels the color sample stands for.
+            const float there = luma.sample(s, uv).r;
+            const float w = bilinear * (exp(-abs(luma_here - there) * 24.0) + 0.002);
+            sum += chroma.sample(nearest, uv).rg * w;
+            weight += w;
+        }
+    }
+    const float2 c = (sum / max(weight, 1e-5) * 255.0 - 128.0) / 224.0;
     const float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y,
                               y + 1.8556 * c.x);
     return float4(saturate(rgb), 1.0);
@@ -3149,7 +3173,7 @@ void RendererMetal::RenderGenerated(CAMetalLayer* target,
     id<MTLRenderPipelineState> ycbcr_pipeline = fg_from_ycbcr;
     id<MTLSamplerState> ycbcr_sampler = fg_sampler;
     const auto interpolate = g_fg_hooks.interpolate;
-    const s32 made_sharpness = MadeFrameSharpness();
+    const s32 made_sharpness = MadeFrameSharpness(true);
 #if AZAHAR_HAS_METALFX
     // A VideoToolbox frame while MetalFX frame interpolation is chosen (it could not make this
     // one): its upscaler is made the first time it is needed.
