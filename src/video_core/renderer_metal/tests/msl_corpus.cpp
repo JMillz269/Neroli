@@ -304,6 +304,8 @@ int main(int argc, char** argv) {
         // Conservative W-buffer depth, depth(less) or depth(greater) (used with W-buffering).
         metal_config.conservative_w_depth = static_cast<u8>(rng() % 3);
         metal_config.hardware_lod = (rng() % 2) == 0;
+        // Lit blended draws that throw away pixels without alpha before the lighting.
+        metal_config.skip_transparent = (rng() % 2) == 0;
 
         Write(out_dir, "fs_random_" + std::to_string(i) + ".metal",
               MSL::GenerateFragmentShader(config, user, profile, metal_config));

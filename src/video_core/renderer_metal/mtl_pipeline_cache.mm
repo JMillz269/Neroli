@@ -509,6 +509,32 @@ PipelineCache::ShaderHandle PipelineCache::UseFragmentShader(const Pica::RegsInt
     if (metal_config.half_interpolants) {
         hash = Common::HashCombine(hash, 0x4A1F'1177'0000'0005ULL);
     }
+    // Fully transparent pixels of a blended draw change nothing, see skip_transparent.
+    if (fs_config.lighting.enable.Value() != 0 && fs_config.framebuffer.alphablend_enable) {
+        using Factor = Pica::FramebufferRegs::BlendFactor;
+        using Equation = Pica::FramebufferRegs::BlendEquation;
+        const auto& output_merger = regs.framebuffer.output_merger;
+        const auto& blending = output_merger.alpha_blending;
+        const auto& fb_regs = regs.framebuffer.framebuffer;
+        const bool keeps_destination = [](Factor factor) {
+            return factor == Factor::One || factor == Factor::OneMinusSourceAlpha;
+        }(blending.factor_dest_rgb) &&
+                                       (blending.factor_dest_a == Factor::One ||
+                                        blending.factor_dest_a == Factor::OneMinusSourceAlpha);
+        const bool writes_depth =
+            fb_regs.allow_depth_stencil_write != 0 && output_merger.depth_write_enable != 0;
+        const bool writes_stencil = fb_regs.allow_depth_stencil_write != 0 &&
+                                    output_merger.stencil_test.enable != 0 &&
+                                    output_merger.stencil_test.write_mask != 0;
+        metal_config.skip_transparent =
+            blending.blend_equation_rgb.Value() == Equation::Add &&
+            blending.blend_equation_a.Value() == Equation::Add &&
+            blending.factor_source_rgb == Factor::SourceAlpha && keeps_destination &&
+            !writes_depth && !writes_stencil && !fs_config.framebuffer.shadow_rendering;
+        if (metal_config.skip_transparent) {
+            hash = Common::HashCombine(hash, 0x7A2E'0000'0000'0012ULL);
+        }
+    }
     // An explicit level in the shader turns off anisotropic filtering, see hardware_lod.
     metal_config.hardware_lod = GetQualityOptions().max_anisotropy > 1;
     if (metal_config.hardware_lod) {

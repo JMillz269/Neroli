@@ -1962,15 +1962,20 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
     }
 
     /// The combiners and the alpha test once before the lighting (WriteMain), in a block of
-    /// their own. Only the alpha is used, the compiler drops the color work it does not need.
+    /// their own, and for a blended draw that a pixel without alpha does not change
+    /// (MetalFSConfig::skip_transparent) the test for an alpha of 0. Only the alpha is used, the
+    /// compiler drops the color work it does not need.
     /// With fast color math the code is the same half precision code as the real combiners, so
     /// a pixel is thrown away here exactly when the test after them would throw it away.
     void WriteEarlyAlphaTest() {
         using CompareFunc = FramebufferRegs::CompareFunc;
         const CompareFunc func = config.framebuffer.alpha_test_func;
-        if (!config.lighting.enable || func == CompareFunc::Always ||
-            func == CompareFunc::Never || config.framebuffer.shadow_rendering ||
-            AlphaNeedsLighting()) {
+        const bool alpha_test = func != CompareFunc::Always && func != CompareFunc::Never;
+        // The gas mode replaces the output, the fog only its color.
+        const bool skip_transparent = metal.skip_transparent &&
+                                      config.texture.fog_mode != TexturingRegs::FogMode::Gas;
+        if (!config.lighting.enable || (!alpha_test && !skip_transparent) ||
+            config.framebuffer.shadow_rendering || AlphaNeedsLighting()) {
             return;
         }
         out += "        {\n";
@@ -1995,6 +2000,12 @@ constant int proctex_noise_table2[16] = {10,2,15,8,0,7,4,5,5,13,2,6,13,9,3,14};
             out += "        combiner_output = float4(tev_out);\n        }\n";
         }
         WriteAlphaTestCondition(func);
+        if (skip_transparent) {
+            // The output alpha is rounded to 8 bits: below half a step it is 0, and the blending
+            // keeps the framebuffer as it was.
+            out += "        if (combiner_output.a < 0.5f / 255.0f) {\n"
+                   "            discard_fragment();\n            return fs_out;\n        }\n";
+        }
         out += "        }\n";
     }
 

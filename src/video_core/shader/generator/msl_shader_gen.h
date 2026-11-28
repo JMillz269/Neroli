@@ -117,6 +117,11 @@ struct MetalFSConfig {
     /// and promises the GPU on which side of the rasterized depth it is so hidden fragments can be
     /// rejected before shading.
     u8 conservative_w_depth = 0;
+    /// The draw blends so that a pixel with an alpha of 0 leaves the framebuffer as it was
+    /// (source factor "source alpha", destination factor "one minus source alpha" or "one", both
+    /// adding) and writes neither depth nor stencil: a lit draw then computes the alpha before
+    /// the lighting and throws such pixels away without lighting them.
+    bool skip_transparent = false;
     /// 2D textures are sampled with the GPU's own level of detail (from the screen-space
     /// derivatives, plus the PICA LOD bias) instead of the PICA formula computed in the shader
     /// and passed as an explicit level. An explicit level turns off the sampler's anisotropic
